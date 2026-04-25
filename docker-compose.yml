@@ -1,5 +1,6 @@
 services:
   app:
+    image: 20260425-system-demo-git:latest
     build:
       context: .
       dockerfile: Dockerfile
