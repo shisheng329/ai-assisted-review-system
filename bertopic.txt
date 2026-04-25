@@ -1,0 +1,67 @@
+import pandas as pd
+df = pd.read_csv('/content/drive/MyDrive/AI-scoping review/20260414-183p.csv')
+print(df.columns.tolist())
+!pip install bertopic umap-learn
+# 1. 导入必要的库 (注意：我们新引入了底层的 UMAP 降维算法)
+import pandas as pd
+from bertopic import BERTopic
+from sklearn.feature_extraction.text import CountVectorizer
+from umap import UMAP
+
+# 2. 读取您的CSV数据
+df = pd.read_csv('/content/drive/MyDrive/AI-scoping review/20260414-183p.csv')
+df['Title'] = df['Title'].fillna('')
+df['Abstract'] = df['Abstract'].fillna('')
+df['text'] = df['Title'] + ". " + df['Abstract']
+docs = df['text'].tolist()
+
+# 3. 【核心修改：锁死随机性】
+# random_state=42 就像打了一个时间戳，数字42是程序员界常用的幸运数字，您改成1、100都可以
+# 只要这个数字不变，底层的“随机初始值”就永远不会变
+umap_model = UMAP(n_neighbors=15, n_components=5, min_dist=0.0, metric='cosine', random_state=42)
+
+# 4. 初始化停用词过滤器
+vectorizer_model = CountVectorizer(stop_words="english")
+
+# 5. 初始化并训练BERTopic模型 (把刚刚设置好的 umap_model 放进去)
+from sentence_transformers import SentenceTransformer
+
+topic_model = BERTopic(
+    language="multilingual",
+    embedding_model=SentenceTransformer('all-MiniLM-L6-v2'),  # ← 明确指定模型
+    vectorizer_model=vectorizer_model,
+    umap_model=umap_model,
+    min_topic_size=5,
+    nr_topics=15
+)
+
+# 开始聚类分析
+topics, probs = topic_model.fit_transform(docs)
+
+# 6. 查看排名前列的主题信息
+topic_info = topic_model.get_topic_info()
+pd.set_option('display.max_rows', None)
+print("锁定随机数后的聚类结果：")
+print(topic_info)
+# 1. 将算法算出的主题编号，作为新的一列添加到您原来的表格中
+df['Topic'] = topics
+
+# 2. 获取每个主题的代表性词汇，也合并到表格中方便查看
+topic_names = topic_model.get_topic_info().set_index('Topic')['Name'].to_dict()
+df['Topic_Name'] = df['Topic'].map(topic_names)
+
+# 3. 将包含分类结果的新表格保存为一个新的CSV文件
+output_filename = '/content/drive/MyDrive/AI-scoping review/20260415_Clustered_Results.csv'
+df.to_csv(output_filename, index=False, encoding='utf-8-sig')
+
+print(f"恭喜！聚类结果已成功保存为：{output_filename}")
+print("请在左侧文件列表中刷新并下载该文件。")
+# 1. 生成主题词条形图（展示每个主题下权重最高的专业词汇）
+fig_barchart = topic_model.visualize_barchart(top_n_topics=15)
+fig_barchart.show()
+# 2. 生成交互式的主题气泡图（展示三大主题之间的关联和距离）
+fig_topics = topic_model.visualize_topics()
+fig_topics.show()
+# 3. 生成文档层级聚类图（展示文献是如何一步步合并成这三个大类的）
+fig_hierarchy = topic_model.visualize_hierarchy()
+fig_hierarchy.show()

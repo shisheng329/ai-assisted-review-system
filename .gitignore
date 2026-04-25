@@ -1,0 +1,40 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+uploads/
+exports/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Streamlit and app runtime noise
+.streamlit/secrets.toml
+logs/
+*.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
