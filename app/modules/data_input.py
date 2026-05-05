@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app import ui
 from app.services.i18n import t
 from app.services.llm import get_active_api_config
 from app.services.storage import (
@@ -17,10 +18,10 @@ from app.services.storage import (
 
 
 def render(project: dict, user: dict) -> None:
-    st.subheader(t("data_input"))
     api_ready = get_active_api_config(int(user["id"])) is not None
     active_file = get_active_data_file(int(project["id"]), int(user["id"]))
     st.caption((t("api_ready") if api_ready else t("api_missing")) + f" | {t('current_data_source')}: {active_file['filename'] if active_file else t('no_data')}")
+    ui.section_title(t("upload_dataset"))
     upload = st.file_uploader(t("upload_dataset"), type=["csv", "xlsx", "xls"], accept_multiple_files=False)
     if upload is not None:
         try:
@@ -30,7 +31,7 @@ def render(project: dict, user: dict) -> None:
                 st.error(f"{t('required_columns_missing')}: {', '.join(missing)}")
             else:
                 st.session_state["pending_dataset_upload"] = {"name": upload.name, "bytes": upload.getvalue()}
-                st.markdown(f"### {t('preview')}")
+                ui.section_title(t("preview"), upload.name)
                 st.dataframe(preview_df.head(10), use_container_width=True)
                 if st.button(t("save_to_project"), key="save_pending_dataset", use_container_width=True):
                     pending = st.session_state.get("pending_dataset_upload")
@@ -44,14 +45,14 @@ def render(project: dict, user: dict) -> None:
 
     active_file, active_df = load_project_dataframe(int(project["id"]), int(user["id"]))
     if active_file and active_df is not None:
-        st.markdown(f"### {t('preview')}")
+        ui.section_title(t("preview"), active_file["filename"])
         st.caption(f"{t('current_data_source')}: {active_file['filename']}")
         st.dataframe(active_df.head(10), use_container_width=True)
         col1, col2 = st.columns(2)
         col1.metric(t("record_count"), active_file["row_count"])
         col2.metric(t("abstract_count"), active_file["abstract_count"])
 
-    st.markdown(f"### {t('uploaded_files')}")
+    ui.section_title(t("uploaded_files"))
     files = get_project_files(int(project["id"]), int(user["id"]))
     if not files:
         st.info(t("no_data"))

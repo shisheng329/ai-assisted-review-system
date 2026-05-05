@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app import ui
 from app.services.bertopic_service import (
     list_chart_interpretations,
     list_topic_runs,
@@ -87,7 +88,7 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
     runs = list_topic_runs(project_id, user_id)
     if not runs:
         return
-    st.markdown(f"### {t('topic_overview')}")
+    ui.section_title(t("topic_overview"))
     selected_run = st.selectbox(t("bertopic_run"), runs, format_func=lambda item: f"#{item['id']} | {item['created_at']} | {item['status']}")
     topic_info = pd.DataFrame(selected_run.get("topic_info", []))
     if not topic_info.empty:
@@ -138,9 +139,7 @@ def render(project: dict, user: dict) -> None:
     user_id = int(user["id"])
     _ensure_state(project_id)
     prefix = f"bertopic_{project_id}"
-    st.subheader(t("bertopic"))
-
-    st.markdown(f"### {t('run_bertopic')}")
+    ui.section_title(t("run_bertopic"))
     source_mode = st.radio(t("source_selection"), [t("inherit_screening_results"), t("upload_new_dataset")], horizontal=True)
     working_df = None
     screening_run_id = None

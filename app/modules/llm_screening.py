@@ -7,6 +7,7 @@ import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
+from app import ui
 from app.services.i18n import t
 from app.services.llm import get_active_api_config
 from app.services.screening import (
@@ -248,14 +249,14 @@ def render(project: dict, user: dict) -> None:
         return
     st.caption(f"{t('current_data_source')}: {active_file['filename']} ({active_file['row_count']})")
 
-    st.markdown(f"### {t('criteria_draft')}")
+    ui.section_title(t("criteria_draft"))
     st.session_state[f"{prefix}_review_topic"] = st.text_area(t("review_topic"), value=st.session_state[f"{prefix}_review_topic"])
     st.session_state[f"{prefix}_key_points"] = st.text_area(t("key_points"), value=st.session_state[f"{prefix}_key_points"])
     st.session_state[f"{prefix}_inclusion"] = st.text_area(t("inclusion_criteria"), value=st.session_state[f"{prefix}_inclusion"])
     st.session_state[f"{prefix}_exclusion"] = st.text_area(t("exclusion_criteria"), value=st.session_state[f"{prefix}_exclusion"])
 
     dimensions = st.session_state[f"{prefix}_dimensions"]
-    st.markdown(f"#### {t('dimensions')}")
+    ui.section_title(t("dimensions"))
     header = st.columns([1, 3, 4, 0.7, 0.7])
     header[1].caption(t("dimension_name"))
     header[2].caption(t("dimension_description"))
@@ -322,7 +323,7 @@ def render(project: dict, user: dict) -> None:
                 st.error(str(exc))
 
         if st.session_state.get(f"{prefix}_ai_expanded") or st.session_state.get(f"{prefix}_expanded_topic"):
-            st.markdown(f"### {t('ai_expansion')}")
+            ui.section_title(t("ai_expansion"))
             st.text_area(t("expanded_review_topic"), height=120, key=f"{prefix}_expanded_topic")
             st.text_area(t("expanded_inclusion_criteria"), height=120, key=f"{prefix}_expanded_include")
             st.text_area(t("expanded_exclusion_criteria"), height=120, key=f"{prefix}_expanded_exclude")
@@ -344,7 +345,7 @@ def render(project: dict, user: dict) -> None:
                 st.session_state[f"{prefix}_pending_snapshot_restore"] = int(snapshot["id"])
                 st.rerun()
 
-    st.markdown(f"### {t('final_prompt')}")
+    ui.section_title(t("final_prompt"))
     st.text_area(t("prompt_text"), height=450, key=f"{prefix}_prompt_editor")
     st.session_state[f"{prefix}_prompt"] = st.session_state.get(f"{prefix}_prompt_editor", "")
     prompt_text = st.session_state[f"{prefix}_prompt"]
@@ -377,7 +378,7 @@ def render(project: dict, user: dict) -> None:
                 st.session_state[f"{prefix}_pending_prompt_restore"] = int(version["id"])
                 st.rerun()
 
-    st.markdown(f"### {t('start_screening')}")
+    ui.section_title(t("start_screening"))
     if st.button(t("run_screening"), use_container_width=True, disabled=(api_config is None or not prompt_text.strip())):
         file_record, df = load_project_dataframe(project_id, user_id)
         if df is None:
@@ -409,7 +410,7 @@ def render(project: dict, user: dict) -> None:
 
     runs = list_screening_runs(project_id, user_id)
     if runs:
-        st.markdown(f"### {t('screening_results')}")
+        ui.section_title(t("screening_results"))
         selected_run = st.selectbox(t("screening_run"), runs, format_func=lambda item: f"#{item['id']} | {item['created_at']} | {item['status']}")
         result_df = get_screening_results(int(selected_run["id"]))
         if not result_df.empty:

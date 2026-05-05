@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app import ui
 from app.services.i18n import language_options, set_language, t
 from app.services.llm import (
     activate_api_config,
@@ -15,7 +16,7 @@ from app.services.provider_catalog import get_provider_spec, list_provider_specs
 
 
 def render(user: dict) -> None:
-    st.subheader(t("profile"))
+    ui.section_title(t("profile"))
     st.caption(f"{user['display_name']} / {user['username']} / {user['email']}")
 
     language_map = language_options()
@@ -27,7 +28,7 @@ def render(user: dict) -> None:
         set_language(chosen_lang)
         st.rerun()
 
-    st.markdown(f"### {t('api_configs')}")
+    ui.section_title(t("api_configs"))
     catalog_specs = list_provider_specs()
     catalog_labels = [spec.provider_name for spec in catalog_specs]
     mode = st.radio(
@@ -79,7 +80,7 @@ def render(user: dict) -> None:
             st.error(f"{t('api_test_failed')}: {exc}")
 
     for config in configs:
-        cols = st.columns([2, 2, 2, 1.2, 1])
+        cols = st.columns([1.7, 2.45, 1.65, 1.9, 1.25])
         cols[0].markdown(f"**{config['provider_name']}**")
         cols[1].caption(config["base_url"])
         cols[2].caption(config["model_name"])

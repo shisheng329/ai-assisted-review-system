@@ -4,6 +4,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from app import ui
 from app.services.i18n import t
 from app.services.llm import get_active_api_config
 from app.services.pdf_service import get_pdf_results, list_pdf_runs, run_pdf_extraction
@@ -49,7 +50,7 @@ def _render_pdf_results(project_id: int, user_id: int) -> None:
     runs = list_pdf_runs(project_id, user_id)
     if not runs:
         return
-    st.markdown(f"### {t('pdf_results')}")
+    ui.section_title(t("pdf_results"))
     selected_run = st.selectbox(t("pdf_run"), runs, format_func=lambda item: f"#{item['id']} | {item['created_at']} | {item['status']}")
     results_df = get_pdf_results(int(selected_run["id"]))
     st.dataframe(results_df, use_container_width=True)
@@ -64,7 +65,6 @@ def render(project: dict, user: dict) -> None:
     prefix = f"pdf_{project_id}"
     _ensure_state(project_id)
     _apply_pending_pdf_selection(prefix)
-    st.subheader(t("pdf_extraction"))
     api_config = get_active_api_config(user_id)
 
     templates = list_pdf_templates(project_id, user_id)
@@ -84,7 +84,7 @@ def render(project: dict, user: dict) -> None:
         selected_pdf_ids = available_pdf_ids
         st.session_state[f"{prefix}_selected_pdf_ids"] = selected_pdf_ids
 
-    st.markdown(f"### {t('start_extraction')}")
+    ui.section_title(t("start_extraction"))
     template_ready = selected_template is not None
     pdf_ready = bool(selected_pdf_ids)
     if st.button(t("start_extraction"), use_container_width=True, disabled=(api_config is None or not template_ready or not pdf_ready)):
@@ -121,7 +121,7 @@ def render(project: dict, user: dict) -> None:
             except Exception as exc:
                 st.error(f"{t('operation_failed')}: {exc}")
 
-    st.markdown(f"#### {t('manage_templates')}")
+    ui.section_title(t("manage_templates"))
     if templates:
         chosen_template_id = st.selectbox(
             t("select_template"),
@@ -165,13 +165,13 @@ def render(project: dict, user: dict) -> None:
         preview_name = selected_template["filename"]
 
     if preview_payload is not None:
-        st.markdown(f"### {t('template_preview')}")
+        ui.section_title(t("template_preview"))
         st.caption(preview_name)
         st.dataframe(preview_payload, use_container_width=True)
     else:
         st.info(t("upload_template_first"))
 
-    st.markdown(f"#### {t('manage_pdf_files')}")
+    ui.section_title(t("manage_pdf_files"))
     pdf_uploads = st.file_uploader(t("pdf_upload"), accept_multiple_files=True, key=f"{prefix}_pdf_upload")
     if pdf_uploads:
         invalid_files = [item.name for item in pdf_uploads if not _valid_suffix(item.name, {".pdf"})]

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app import ui
 from app.services.i18n import t
 from app.services.projects import create_project, list_projects
 
 
 def render(user: dict) -> None:
-    st.subheader(t("projects"))
+    ui.section_title(t("projects"))
     with st.expander(t("create_project"), expanded=True):
         with st.form("create_project_form", clear_on_submit=True):
             name = st.text_input(t("project_name"))
@@ -25,6 +26,7 @@ def render(user: dict) -> None:
         st.info(t("no_data"))
         return
 
+    ui.section_title(t("projects"), f"{len(projects)}")
     for project in projects:
         col1, col2, col3 = st.columns([3, 4, 1.2])
         with col1:
