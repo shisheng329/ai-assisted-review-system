@@ -68,6 +68,12 @@ GitHub 私有仓库 -> 云服务器 git pull -> Python venv -> systemd -> Nginx 
 deploy/
 ```
 
+快速部署说明见：
+
+```text
+deploy/README.md
+```
+
 服务器推荐运行数据目录：
 
 ```text
