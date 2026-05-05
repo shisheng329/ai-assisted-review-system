@@ -23,12 +23,19 @@ def data_root() -> Path:
     return db_path.parent
 
 
+def _configured_dir(env_name: str, default_name: str) -> Path:
+    configured = os.getenv(env_name)
+    if configured:
+        return Path(configured)
+    return app_root() / default_name
+
+
 def uploads_root() -> Path:
-    return app_root() / "uploads"
+    return _configured_dir("UPLOADS_PATH", "uploads")
 
 
 def exports_root() -> Path:
-    return app_root() / "exports"
+    return _configured_dir("EXPORTS_PATH", "exports")
 
 
 def ensure_dir(path: Path) -> Path:

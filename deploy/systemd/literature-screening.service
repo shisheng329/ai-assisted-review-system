@@ -1,0 +1,17 @@
+[Unit]
+Description=Literature Screening Streamlit App
+After=network.target
+
+[Service]
+Type=simple
+User=literature
+Group=literature
+WorkingDirectory=/opt/literature-screening-app
+EnvironmentFile=/etc/literature-screening/literature-screening.env
+Environment=PYTHONPATH=/opt/literature-screening-app
+ExecStart=/opt/literature-screening-app/.venv/bin/python -m streamlit run app/main.py --server.address 127.0.0.1 --server.port 8502 --server.headless true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
