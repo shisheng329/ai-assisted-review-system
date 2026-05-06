@@ -49,6 +49,12 @@ cd /tmp/ai-assisted-review-system
 sudo bash deploy/scripts/bootstrap_ubuntu.sh
 ```
 
+阿里云 `39.105.174.183` 的专用步骤见：
+
+```text
+deploy/ALIYUN_39.105.174.183.md
+```
+
 如果 GitHub 仓库是 private，需要先在服务器配置 GitHub 访问权限。推荐用 deploy key，也可以临时用 GitHub personal access token 克隆。不要把 token 写进仓库或部署文档。
 
 如果已经有域名，例如 `review.example.com`，执行：
@@ -114,6 +120,7 @@ sudo systemctl status literature-screening
 
 ```bash
 sudo cp deploy/nginx/literature-screening.conf /etc/nginx/sites-available/literature-screening.conf
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo ln -sfn /etc/nginx/sites-available/literature-screening.conf /etc/nginx/sites-enabled/literature-screening.conf
 sudo nginx -t
 sudo systemctl reload nginx
