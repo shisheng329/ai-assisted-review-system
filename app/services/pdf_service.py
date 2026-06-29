@@ -116,9 +116,11 @@ def run_pdf_extraction(project_id: int, user_id: int, template_id: int, template
         df = pd.DataFrame(rows)
         export_path = project_exports_root(user_id, project_id) / f"pdf_extract_{short_uuid()}.csv"
         save_export_dataframe(df, export_path)
+        failed_count = sum(1 for row in rows if row["error_message"])
+        run_status = "failed" if failed_count == len(rows) else "completed"
         db.execute(
-            "UPDATE pdf_runs SET status = 'completed', output_path = ?, updated_at = ? WHERE id = ?",
-            (str(export_path), utc_now_iso(), run_id),
+            "UPDATE pdf_runs SET status = ?, output_path = ?, updated_at = ? WHERE id = ?",
+            (run_status, str(export_path), utc_now_iso(), run_id),
         )
         return {"run_id": run_id, "results_df": df}
     except Exception:

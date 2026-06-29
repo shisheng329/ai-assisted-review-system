@@ -35,16 +35,17 @@ def save_api_config(
     language_pref: str,
     activate: bool,
 ) -> int:
-    if activate:
-        db.execute("UPDATE api_configs SET is_active = 0 WHERE user_id = ?", (user_id,))
-    config_id = db.execute(
-        """
-        INSERT INTO api_configs (user_id, provider_name, base_url, api_key, model_name, language_pref, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-        """,
-        (user_id, provider_name, base_url.rstrip("/"), api_key, model_name, language_pref, 1 if activate else 0),
-    )
-    return config_id
+    with db.connect() as conn:
+        if activate:
+            conn.execute("UPDATE api_configs SET is_active = 0 WHERE user_id = ?", (user_id,))
+        cursor = conn.execute(
+            """
+            INSERT INTO api_configs (user_id, provider_name, base_url, api_key, model_name, language_pref, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            """,
+            (user_id, provider_name, base_url.rstrip("/"), api_key, model_name, language_pref, 1 if activate else 0),
+        )
+        return int(cursor.lastrowid)
 
 
 def list_api_configs(user_id: int) -> list[dict[str, Any]]:

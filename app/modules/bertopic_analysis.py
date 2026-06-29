@@ -140,12 +140,17 @@ def render(project: dict, user: dict) -> None:
     _ensure_state(project_id)
     prefix = f"bertopic_{project_id}"
     ui.section_title(t("run_bertopic"))
-    source_mode = st.radio(t("source_selection"), [t("inherit_screening_results"), t("upload_new_dataset")], horizontal=True)
+    source_mode = st.radio(
+        t("source_selection"),
+        ["inherit_screening_results", "upload_new_dataset"],
+        format_func=t,
+        horizontal=True,
+    )
     working_df = None
     screening_run_id = None
     data_file_id = None
 
-    if source_mode == t("inherit_screening_results"):
+    if source_mode == "inherit_screening_results":
         screening_runs = list_screening_runs(project_id, user_id)
         completed_runs = [run for run in screening_runs if run["status"] == "completed"]
         if not completed_runs:
@@ -181,7 +186,7 @@ def render(project: dict, user: dict) -> None:
                 project_id,
                 user_id,
                 working_df,
-                "screening" if source_mode == t("inherit_screening_results") else "upload",
+                "screening" if source_mode == "inherit_screening_results" else "upload",
                 params,
                 data_file_id=data_file_id,
                 screening_run_id=screening_run_id,

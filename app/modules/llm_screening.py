@@ -158,16 +158,16 @@ def _render_bilingual_review(prefix: str, bilingual: dict[str, str]) -> None:
         gap: 16px;
       }}
       .bi-card {{
-        border: 1px solid rgba(39,93,245,0.15);
-        border-radius: 14px;
-        background: #f8faff;
+        border: 1px solid rgba(16,185,129,0.18);
+        border-radius: 8px;
+        background: #ffffff;
         overflow: hidden;
       }}
       .bi-title {{
         padding: 10px 14px;
         font-weight: 600;
-        border-bottom: 1px solid rgba(39,93,245,0.1);
-        background: rgba(39,93,245,0.04);
+        border-bottom: 1px solid rgba(16,185,129,0.14);
+        background: #ecfdf5;
       }}
       .bi-body {{
         height: 320px;

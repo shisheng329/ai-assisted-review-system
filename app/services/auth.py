@@ -61,14 +61,15 @@ def create_session(user_id: int) -> str:
 def get_user_by_session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
+    now = datetime.now(timezone.utc).isoformat()
     row = db.fetch_one(
         """
         SELECT users.*
         FROM sessions
         JOIN users ON users.id = sessions.user_id
-        WHERE sessions.token = ?
+        WHERE sessions.token = ? AND sessions.expires_at > ?
         """,
-        (token,),
+        (token, now),
     )
     if not row:
         return None

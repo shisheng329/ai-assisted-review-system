@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from . import db
-from .utils import ensure_dir, exports_root, json_dumps, safe_filename, short_uuid, uploads_root, utc_now_iso
+from .utils import ensure_dir, exports_root, json_dumps, json_loads, safe_filename, short_uuid, uploads_root, utc_now_iso
 
 
 REQUIRED_COLUMNS = ["Record-id", "Title", "Abstract"]
@@ -146,10 +146,47 @@ def load_project_dataframe(project_id: int, user_id: int, data_file_id: int | No
     return record, read_dataframe(record["stored_path"])
 
 
+def _managed_export_path(path_value: str | None) -> Path | None:
+    if not path_value:
+        return None
+    try:
+        candidate = Path(path_value).resolve()
+        candidate.relative_to(exports_root().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
+
+
+def _collect_data_file_artifact_paths(file_id: int) -> list[Path]:
+    paths: dict[str, Path] = {}
+    screening_rows = db.fetch_all("SELECT export_path FROM screening_runs WHERE data_file_id = ?", (file_id,))
+    topic_rows = db.fetch_all("SELECT output_path, artifacts_json FROM topic_runs WHERE data_file_id = ?", (file_id,))
+
+    for row in screening_rows:
+        path = _managed_export_path(row["export_path"])
+        if path:
+            paths[str(path)] = path
+
+    for row in topic_rows:
+        output_path = _managed_export_path(row["output_path"])
+        if output_path:
+            paths[str(output_path)] = output_path
+        artifacts = json_loads(row["artifacts_json"], {})
+        if isinstance(artifacts, dict):
+            for artifact_path in artifacts.values():
+                if isinstance(artifact_path, str):
+                    path = _managed_export_path(artifact_path)
+                    if path:
+                        paths[str(path)] = path
+
+    return list(paths.values())
+
+
 def delete_data_file(project_id: int, user_id: int, file_id: int) -> None:
     file_row = db.fetch_one("SELECT * FROM data_files WHERE id = ? AND project_id = ? AND user_id = ?", (file_id, project_id, user_id))
     if not file_row:
         return
+    artifact_paths = _collect_data_file_artifact_paths(file_id)
     with db.connect() as conn:
         conn.execute("DELETE FROM screening_runs WHERE data_file_id = ?", (file_id,))
         conn.execute("DELETE FROM topic_runs WHERE data_file_id = ?", (file_id,))
@@ -166,6 +203,8 @@ def delete_data_file(project_id: int, user_id: int, file_id: int) -> None:
             )
             if replacement:
                 conn.execute("UPDATE data_files SET is_active = 1 WHERE id = ?", (replacement["id"],))
+    for path in artifact_paths:
+        path.unlink(missing_ok=True)
     Path(file_row["stored_path"]).unlink(missing_ok=True)
 
 
