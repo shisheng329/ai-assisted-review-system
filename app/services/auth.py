@@ -27,7 +27,16 @@ def _verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(expected, f"{salt}${digest}")
 
 
-def register_user(username: str, email: str, password: str, display_name: str, preferred_language: str) -> int:
+def register_user(
+    username: str,
+    email: str,
+    password: str,
+    display_name: str | None = None,
+    preferred_language: str = "zh-CN",
+) -> int:
+    clean_username = username.strip()
+    clean_email = email.strip().lower()
+    clean_display_name = (display_name or clean_username).strip()
     salt = secrets.token_hex(8)
     password_hash = _hash_password(password, salt)
     return db.execute(
@@ -35,12 +44,12 @@ def register_user(username: str, email: str, password: str, display_name: str, p
         INSERT INTO users (username, email, password_hash, display_name, preferred_language, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (username.strip(), email.strip(), password_hash, display_name.strip(), preferred_language, utc_now_iso()),
+        (clean_username, clean_email, password_hash, clean_display_name, preferred_language, utc_now_iso()),
     )
 
 
-def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
-    row = db.fetch_one("SELECT * FROM users WHERE username = ?", (username.strip(),))
+def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
+    row = db.fetch_one("SELECT * FROM users WHERE lower(email) = lower(?)", (email.strip(),))
     if not row:
         return None
     if not _verify_password(password, row["password_hash"]):

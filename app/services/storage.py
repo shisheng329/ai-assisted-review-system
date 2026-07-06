@@ -14,6 +14,10 @@ from .utils import ensure_dir, exports_root, json_dumps, json_loads, safe_filena
 REQUIRED_COLUMNS = ["Record-id", "Title", "Abstract"]
 
 
+class ManagedFileMissingError(FileNotFoundError):
+    pass
+
+
 def project_root(user_id: int, project_id: int) -> Path:
     return ensure_dir(uploads_root() / f"user_{user_id}" / f"project_{project_id}")
 
@@ -29,11 +33,14 @@ def save_uploaded_file(uploaded_file: Any, destination: Path) -> Path:
 
 
 def read_dataframe(file_path: str | Path) -> pd.DataFrame:
-    suffix = Path(file_path).suffix.lower()
+    path = Path(file_path)
+    if not path.exists():
+        raise ManagedFileMissingError(str(path))
+    suffix = path.suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(file_path)
+        return pd.read_csv(path)
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(file_path)
+        return pd.read_excel(path)
     raise ValueError(f"Unsupported file type: {suffix}")
 
 
@@ -50,6 +57,33 @@ def validate_dataframe(df: pd.DataFrame) -> list[str]:
     return [column for column in REQUIRED_COLUMNS if column not in df.columns]
 
 
+def source_export_path(user_id: int, project_id: int, source_filename: str, result_label: str) -> Path:
+    stem = Path(safe_filename(source_filename)).stem or "dataset"
+    return project_exports_root(user_id, project_id) / f"{stem}-{result_label}.csv"
+
+
+def require_existing_path(path_value: str | Path | None) -> Path:
+    if not path_value:
+        raise ManagedFileMissingError("")
+    path = Path(path_value)
+    if not path.exists():
+        raise ManagedFileMissingError(str(path))
+    return path
+
+
+def read_export_dataframe(path_value: str | Path | None) -> pd.DataFrame:
+    return read_dataframe(require_existing_path(path_value))
+
+
+def unlink_managed_file(path_value: str | Path | None) -> None:
+    if not path_value:
+        return
+    try:
+        Path(path_value).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def save_data_file(user_id: int, project_id: int, uploaded_file: Any) -> dict[str, Any]:
     filename = safe_filename(uploaded_file.name)
     suffix = Path(filename).suffix.lower()
@@ -58,7 +92,7 @@ def save_data_file(user_id: int, project_id: int, uploaded_file: Any) -> dict[st
     df = read_dataframe(stored_path)
     missing = validate_dataframe(df)
     if missing:
-        stored_path.unlink(missing_ok=True)
+        unlink_managed_file(stored_path)
         raise ValueError(", ".join(missing))
     row_count = int(len(df))
     abstract_count = int(df["Abstract"].fillna("").astype(str).str.strip().ne("").sum())
@@ -84,7 +118,7 @@ def save_data_bytes(user_id: int, project_id: int, filename: str, file_bytes: by
     df = read_dataframe(stored_path)
     missing = validate_dataframe(df)
     if missing:
-        stored_path.unlink(missing_ok=True)
+        unlink_managed_file(stored_path)
         raise ValueError(", ".join(missing))
     row_count = int(len(df))
     abstract_count = int(df["Abstract"].fillna("").astype(str).str.strip().ne("").sum())
@@ -112,6 +146,21 @@ def set_active_data_file(project_id: int, user_id: int, file_id: int) -> None:
 
 def get_project_files(project_id: int, user_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in db.fetch_all("SELECT * FROM data_files WHERE project_id = ? AND user_id = ? ORDER BY created_at DESC", (project_id, user_id))]
+
+
+def get_data_file_result_counts(project_id: int, user_id: int) -> dict[int, dict[str, int]]:
+    counts: dict[int, dict[str, int]] = {}
+    for row in db.fetch_all(
+        "SELECT data_file_id, COUNT(*) AS value FROM screening_runs WHERE project_id = ? AND user_id = ? GROUP BY data_file_id",
+        (project_id, user_id),
+    ):
+        counts.setdefault(int(row["data_file_id"]), {"screening": 0, "topic": 0})["screening"] = int(row["value"])
+    for row in db.fetch_all(
+        "SELECT data_file_id, COUNT(*) AS value FROM topic_runs WHERE project_id = ? AND user_id = ? AND data_file_id IS NOT NULL GROUP BY data_file_id",
+        (project_id, user_id),
+    ):
+        counts.setdefault(int(row["data_file_id"]), {"screening": 0, "topic": 0})["topic"] = int(row["value"])
+    return counts
 
 
 def get_active_data_file(project_id: int, user_id: int) -> dict[str, Any] | None:
@@ -204,8 +253,8 @@ def delete_data_file(project_id: int, user_id: int, file_id: int) -> None:
             if replacement:
                 conn.execute("UPDATE data_files SET is_active = 1 WHERE id = ?", (replacement["id"],))
     for path in artifact_paths:
-        path.unlink(missing_ok=True)
-    Path(file_row["stored_path"]).unlink(missing_ok=True)
+        unlink_managed_file(path)
+    unlink_managed_file(file_row["stored_path"])
 
 
 def save_export_dataframe(df: pd.DataFrame, path: Path) -> str:
@@ -301,7 +350,7 @@ def delete_pdf_template(project_id: int, user_id: int, template_id: int) -> None
                 "UPDATE projects SET active_pdf_template_id = ?, updated_at = ? WHERE id = ? AND user_id = ?",
                 (replacement["id"] if replacement else None, utc_now_iso(), project_id, user_id),
             )
-    Path(row["stored_path"]).unlink(missing_ok=True)
+    unlink_managed_file(row["stored_path"])
 
 
 def save_pdf_files(user_id: int, project_id: int, uploaded_files: list[Any]) -> list[int]:
@@ -338,4 +387,4 @@ def delete_pdf_file(project_id: int, user_id: int, file_id: int) -> None:
     if not row:
         return
     db.execute("DELETE FROM pdf_files WHERE id = ? AND project_id = ? AND user_id = ?", (file_id, project_id, user_id))
-    Path(row["stored_path"]).unlink(missing_ok=True)
+    unlink_managed_file(row["stored_path"])

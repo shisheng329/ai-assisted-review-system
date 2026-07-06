@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -18,8 +18,14 @@ from .prompting import (
     build_screening_prompt,
     normalize_dimensions,
 )
-from .storage import project_exports_root, save_export_dataframe
-from .utils import json_dumps, json_loads, short_uuid, utc_now_iso
+from .storage import save_export_dataframe, source_export_path, unlink_managed_file
+from .utils import json_dumps, json_loads, utc_now_iso
+
+ProgressCallback = Callable[[int, int], None]
+
+
+def _fallback_name(prefix: str, item_id: int) -> str:
+    return f"{prefix} #{item_id}"
 
 
 def save_criteria_snapshot(
@@ -31,15 +37,17 @@ def save_criteria_snapshot(
     exclusion_draft: str,
     dimensions: list[dict[str, str]],
     ai_expanded: dict[str, Any] | None,
+    name: str = "",
 ) -> int:
     return db.execute(
         """
-        INSERT INTO criteria_snapshots (project_id, user_id, review_topic, key_points, inclusion_draft, exclusion_draft, dimensions_json, ai_expanded_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO criteria_snapshots (project_id, user_id, name, review_topic, key_points, inclusion_draft, exclusion_draft, dimensions_json, ai_expanded_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
             user_id,
+            name.strip(),
             review_topic,
             key_points,
             inclusion_draft,
@@ -51,18 +59,35 @@ def save_criteria_snapshot(
     )
 
 
+def _format_snapshot(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    item["name"] = item.get("name") or _fallback_name("未命名标准", int(item["id"]))
+    item["dimensions"] = json_loads(item["dimensions_json"], [])
+    item["ai_expanded"] = json_loads(item["ai_expanded_json"], None)
+    return item
+
+
 def list_criteria_snapshots(project_id: int, user_id: int) -> list[dict[str, Any]]:
     rows = db.fetch_all(
         "SELECT * FROM criteria_snapshots WHERE project_id = ? AND user_id = ? ORDER BY created_at DESC",
         (project_id, user_id),
     )
-    results = []
-    for row in rows:
-        item = dict(row)
-        item["dimensions"] = json_loads(item["dimensions_json"], [])
-        item["ai_expanded"] = json_loads(item["ai_expanded_json"], None)
-        results.append(item)
-    return results
+    return [_format_snapshot(row) for row in rows]
+
+
+def get_criteria_snapshot(project_id: int, user_id: int, snapshot_id: int) -> dict[str, Any] | None:
+    row = db.fetch_one(
+        "SELECT * FROM criteria_snapshots WHERE id = ? AND project_id = ? AND user_id = ?",
+        (snapshot_id, project_id, user_id),
+    )
+    return _format_snapshot(row) if row else None
+
+
+def delete_criteria_snapshot(project_id: int, user_id: int, snapshot_id: int) -> None:
+    db.execute(
+        "DELETE FROM criteria_snapshots WHERE id = ? AND project_id = ? AND user_id = ?",
+        (snapshot_id, project_id, user_id),
+    )
 
 
 def expand_criteria_with_ai(user_id: int, review_topic: str, key_points: str, inclusion_draft: str, exclusion_draft: str, dimensions: list[dict[str, str]]) -> dict[str, str]:
@@ -115,29 +140,26 @@ def parse_dimension_rules(dimension_rules: str, fallback_dimensions: list[dict[s
     return results
 
 
-def assemble_prompt(
-    review_topic: str,
-    inclusion_criteria: str,
-    exclusion_criteria: str,
-    dimensions: list[dict[str, str]],
-) -> str:
+def assemble_prompt(review_topic: str, inclusion_criteria: str, exclusion_criteria: str, dimensions: list[dict[str, str]]) -> str:
     return build_screening_prompt(review_topic, inclusion_criteria, exclusion_criteria, dimensions)
 
 
-def assemble_prompt_components(
-    review_topic: str,
-    inclusion_criteria: str,
-    exclusion_criteria: str,
-    dimensions: list[dict[str, str]],
-) -> dict[str, object]:
+def assemble_prompt_components(review_topic: str, inclusion_criteria: str, exclusion_criteria: str, dimensions: list[dict[str, str]]) -> dict[str, object]:
     return build_prompt_components(review_topic, inclusion_criteria, exclusion_criteria, dimensions)
 
 
-def save_prompt_version(project_id: int, user_id: int, prompt_text: str, bilingual_json: dict[str, str] | None = None) -> int:
+def save_prompt_version(project_id: int, user_id: int, prompt_text: str, bilingual_json: dict[str, str] | None = None, name: str = "") -> int:
     return db.execute(
-        "INSERT INTO prompt_versions (project_id, user_id, prompt_text, bilingual_json, created_at) VALUES (?, ?, ?, ?, ?)",
-        (project_id, user_id, prompt_text, json_dumps(bilingual_json) if bilingual_json else None, utc_now_iso()),
+        "INSERT INTO prompt_versions (project_id, user_id, name, prompt_text, bilingual_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, user_id, name.strip(), prompt_text, json_dumps(bilingual_json) if bilingual_json else None, utc_now_iso()),
     )
+
+
+def _format_prompt_version(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    item["name"] = item.get("name") or _fallback_name("未命名 Prompt", int(item["id"]))
+    item["bilingual"] = json_loads(item["bilingual_json"], None)
+    return item
 
 
 def list_prompt_versions(project_id: int, user_id: int) -> list[dict[str, Any]]:
@@ -145,12 +167,22 @@ def list_prompt_versions(project_id: int, user_id: int) -> list[dict[str, Any]]:
         "SELECT * FROM prompt_versions WHERE project_id = ? AND user_id = ? ORDER BY created_at DESC",
         (project_id, user_id),
     )
-    results = []
-    for row in rows:
-        item = dict(row)
-        item["bilingual"] = json_loads(item["bilingual_json"], None)
-        results.append(item)
-    return results
+    return [_format_prompt_version(row) for row in rows]
+
+
+def get_prompt_version(project_id: int, user_id: int, prompt_id: int) -> dict[str, Any] | None:
+    row = db.fetch_one(
+        "SELECT * FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
+        (prompt_id, project_id, user_id),
+    )
+    return _format_prompt_version(row) if row else None
+
+
+def delete_prompt_version(project_id: int, user_id: int, prompt_id: int) -> None:
+    db.execute(
+        "DELETE FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
+        (prompt_id, project_id, user_id),
+    )
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
@@ -191,35 +223,18 @@ def create_bilingual_review(user_id: int, prompt_text: str, components: dict[str
                 "translated_components": translated,
             }
 
-    raw = chat_text(
-        user_id,
-        "You are a precise bilingual reviewer.",
-        build_bilingual_review_prompt(prompt_text),
-        temperature=0.1,
-    )
+    raw = chat_text(user_id, "You are a precise bilingual reviewer.", build_bilingual_review_prompt(prompt_text), temperature=0.1)
     return {"english": prompt_text, "chinese": raw, "mode": "full"}
 
 
 def _format_records_for_prompt(batch: list[dict[str, Any]]) -> str:
     blocks = []
     for item in batch:
-        blocks.append(
-            "\n".join(
-                [
-                    f"Record ID: {item['record_id']}",
-                    f"Title: {item['title']}",
-                    f"Abstract: {item['abstract']}",
-                ]
-            )
-        )
+        blocks.append("\n".join([f"Record ID: {item['record_id']}", f"Title: {item['title']}", f"Abstract: {item['abstract']}"]))
     return "\n\n---\n\n".join(blocks)
 
 
-def _coerce_output(
-    output: dict[str, str],
-    source: dict[str, Any],
-    normalized_dims: list[dict[str, str]],
-) -> dict[str, Any]:
+def _coerce_output(output: dict[str, str], source: dict[str, Any], normalized_dims: list[dict[str, str]]) -> dict[str, Any]:
     decision = (output.get("decision") or "maybe").strip().lower()
     if decision not in {"include", "exclude", "maybe"}:
         decision = "maybe"
@@ -238,14 +253,7 @@ def _coerce_output(
     }
 
 
-def _screen_single_record(
-    user_id: int,
-    prompt_text: str,
-    source: dict[str, Any],
-    csv_headers: list[str],
-    normalized_dims: list[dict[str, str]],
-    temperature: float,
-) -> dict[str, Any]:
+def _screen_single_record(user_id: int, prompt_text: str, source: dict[str, Any], csv_headers: list[str], normalized_dims: list[dict[str, str]], temperature: float) -> dict[str, Any]:
     user_prompt = (
         f"{prompt_text}\n\nSCREEN THIS SINGLE RECORD ONLY.\n"
         f"Title: {source['title']}\nAbstract: {source['abstract']}\nRecord ID: {source['record_id']}\n"
@@ -258,29 +266,18 @@ def _screen_single_record(
     return _coerce_output(parsed[0], source, normalized_dims)
 
 
-def _screen_batch_records(
-    user_id: int,
-    prompt_text: str,
-    batch: list[dict[str, Any]],
-    csv_headers: list[str],
-    normalized_dims: list[dict[str, str]],
-    temperature: float,
-) -> list[dict[str, Any]]:
+def _screen_batch_records(user_id: int, prompt_text: str, batch: list[dict[str, Any]], csv_headers: list[str], normalized_dims: list[dict[str, str]], temperature: float) -> list[dict[str, Any]]:
     if len(batch) == 1:
         return [_screen_single_record(user_id, prompt_text, batch[0], csv_headers, normalized_dims, temperature)]
     user_prompt = (
         f"{prompt_text}\n\nSCREEN THE FOLLOWING {len(batch)} RECORDS.\n"
         "Return one valid CSV table only, with exactly one data row per record. Do not add commentary.\n"
-        f"Use exactly these headers: {', '.join(csv_headers)}\n\n"
-        f"{_format_records_for_prompt(batch)}"
+        f"Use exactly these headers: {', '.join(csv_headers)}\n\n{_format_records_for_prompt(batch)}"
     )
     raw = chat_text(user_id, "Return valid CSV for all supplied records only.", user_prompt, temperature=temperature)
     parsed = parse_single_row_csv(raw)
     if len(parsed) < len(batch):
-        return [
-            _screen_single_record(user_id, prompt_text, source, csv_headers, normalized_dims, temperature)
-            for source in batch
-        ]
+        return [_screen_single_record(user_id, prompt_text, source, csv_headers, normalized_dims, temperature) for source in batch]
     parsed_by_id = {str(item.get("record_id", "")).strip(): item for item in parsed if item.get("record_id")}
     results = []
     for index, source in enumerate(batch):
@@ -303,14 +300,10 @@ def run_screening(
     rate_limit_per_min: int,
     temperature: float,
     prompt_version_id: int | None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     normalized_dims = normalize_dimensions(dimensions)
-    config = {
-        "batch_size": batch_size,
-        "rate_limit_per_min": rate_limit_per_min,
-        "temperature": temperature,
-        "dimensions": normalized_dims,
-    }
+    config = {"batch_size": batch_size, "rate_limit_per_min": rate_limit_per_min, "temperature": temperature, "dimensions": normalized_dims}
     run_id = db.execute(
         """
         INSERT INTO screening_runs (project_id, user_id, data_file_id, prompt_version_id, config_json, status, created_at, updated_at)
@@ -324,25 +317,25 @@ def run_screening(
 
     try:
         records = [
-            {
-                "row_index": int(row_index),
-                "record_id": str(row.get("Record-id", "") or ""),
-                "title": str(row.get("Title", "") or ""),
-                "abstract": str(row.get("Abstract", "") or ""),
-            }
+            {"row_index": int(row_index), "record_id": str(row.get("Record-id", "") or ""), "title": str(row.get("Title", "") or ""), "abstract": str(row.get("Abstract", "") or "")}
             for row_index, row in df.iterrows()
         ]
-        effective_batch_size = max(1, min(int(batch_size or 1), len(records) if records else 1))
-        batches = [records[index : index + effective_batch_size] for index in range(0, len(records), effective_batch_size)]
+        total = len(records)
+        if progress_callback:
+            progress_callback(0, total)
+        effective_batch_size = max(1, min(int(batch_size or 1), total if total else 1))
+        batches = [records[index : index + effective_batch_size] for index in range(0, total, effective_batch_size)]
+        completed = 0
         for batch_index, batch in enumerate(batches):
-            results.extend(_screen_batch_records(user_id, prompt_text, batch, csv_headers, normalized_dims, temperature))
+            batch_results = _screen_batch_records(user_id, prompt_text, batch, csv_headers, normalized_dims, temperature)
+            results.extend(batch_results)
+            completed += len(batch)
+            if progress_callback:
+                progress_callback(completed, total)
             if delay > 0 and batch_index < len(batches) - 1:
                 time.sleep(delay)
     except Exception:
-        db.execute(
-            "UPDATE screening_runs SET status = 'failed', updated_at = ? WHERE id = ?",
-            (utc_now_iso(), run_id),
-        )
+        db.execute("UPDATE screening_runs SET status = 'failed', updated_at = ? WHERE id = ?", (utc_now_iso(), run_id))
         raise
 
     include_count = sum(1 for item in results if item["decision"] == "include")
@@ -351,19 +344,12 @@ def run_screening(
 
     export_rows = []
     for item in results:
-        row = {
-            "record_id": item["record_id"],
-            "title": item["title"],
-            "decision": item["decision"],
-            "confidence": item["confidence"],
-            **item["dimensions"],
-            "primary_reason_code": item["primary_reason_code"],
-            "rationale": item["rationale"],
-        }
-        export_rows.append(row)
+        export_rows.append({"record_id": item["record_id"], "title": item["title"], "decision": item["decision"], "confidence": item["confidence"], **item["dimensions"], "primary_reason_code": item["primary_reason_code"], "rationale": item["rationale"]})
 
     export_df = pd.DataFrame(export_rows)
-    export_path = project_exports_root(user_id, project_id) / f"screening_{short_uuid()}.csv"
+    source_row = db.fetch_one("SELECT filename FROM data_files WHERE id = ? AND project_id = ? AND user_id = ?", (data_file_id, project_id, user_id))
+    source_filename = source_row["filename"] if source_row else f"screening_{run_id}.csv"
+    export_path = source_export_path(user_id, project_id, source_filename, "\u7b5b\u9009")
     save_export_dataframe(export_df, export_path)
 
     db.executemany(
@@ -371,20 +357,7 @@ def run_screening(
         INSERT INTO screening_results (screening_run_id, row_index, record_id, title, decision, confidence, primary_reason_code, rationale, dimensions_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [
-            (
-                run_id,
-                item["row_index"],
-                item["record_id"],
-                item["title"],
-                item["decision"],
-                item["confidence"],
-                item["primary_reason_code"],
-                item["rationale"],
-                json_dumps(item["dimensions"]),
-            )
-            for item in results
-        ],
+        [(run_id, item["row_index"], item["record_id"], item["title"], item["decision"], item["confidence"], item["primary_reason_code"], item["rationale"], json_dumps(item["dimensions"])) for item in results],
     )
     db.execute(
         """
@@ -397,6 +370,29 @@ def run_screening(
     return {"run_id": run_id, "results_df": export_df}
 
 
+def get_existing_screening_runs_for_file(project_id: int, user_id: int, data_file_id: int) -> list[dict[str, Any]]:
+    rows = db.fetch_all(
+        """
+        SELECT * FROM screening_runs
+        WHERE project_id = ? AND user_id = ? AND data_file_id = ?
+        ORDER BY created_at DESC
+        """,
+        (project_id, user_id, data_file_id),
+    )
+    return [dict(row) for row in rows]
+
+
+def delete_screening_run(project_id: int, user_id: int, run_id: int) -> None:
+    row = db.fetch_one("SELECT * FROM screening_runs WHERE id = ? AND project_id = ? AND user_id = ?", (run_id, project_id, user_id))
+    if not row:
+        return
+    export_path = row["export_path"]
+    with db.connect() as conn:
+        conn.execute("UPDATE topic_runs SET screening_run_id = NULL WHERE screening_run_id = ? AND project_id = ? AND user_id = ?", (run_id, project_id, user_id))
+        conn.execute("DELETE FROM screening_runs WHERE id = ? AND project_id = ? AND user_id = ?", (run_id, project_id, user_id))
+    unlink_managed_file(export_path)
+
+
 def list_screening_runs(project_id: int, user_id: int) -> list[dict[str, Any]]:
     return [dict(row) for row in db.fetch_all("SELECT * FROM screening_runs WHERE project_id = ? AND user_id = ? ORDER BY created_at DESC", (project_id, user_id))]
 
@@ -406,14 +402,5 @@ def get_screening_results(run_id: int) -> pd.DataFrame:
     formatted: list[dict[str, Any]] = []
     for row in rows:
         dimensions = json_loads(row["dimensions_json"], {})
-        item = {
-            "record_id": row["record_id"],
-            "title": row["title"],
-            "decision": row["decision"],
-            "confidence": row["confidence"],
-            **dimensions,
-            "primary_reason_code": row["primary_reason_code"],
-            "rationale": row["rationale"],
-        }
-        formatted.append(item)
+        formatted.append({"record_id": row["record_id"], "title": row["title"], "decision": row["decision"], "confidence": row["confidence"], **dimensions, "primary_reason_code": row["primary_reason_code"], "rationale": row["rationale"]})
     return pd.DataFrame(formatted)

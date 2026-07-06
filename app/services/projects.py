@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import shutil
 from typing import Any
 
 from . import db
+from .storage import project_exports_root, project_root
 from .utils import utc_now_iso
 
 
@@ -14,6 +16,28 @@ def create_project(user_id: int, name: str, description: str) -> int:
         """,
         (user_id, name.strip(), description.strip(), utc_now_iso(), utc_now_iso()),
     )
+
+
+def update_project(user_id: int, project_id: int, name: str, description: str) -> None:
+    db.execute(
+        """
+        UPDATE projects
+        SET name = ?, description = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+        """,
+        (name.strip(), description.strip(), utc_now_iso(), project_id, user_id),
+    )
+
+
+def delete_project(user_id: int, project_id: int) -> None:
+    project = get_project(project_id, user_id)
+    if not project:
+        return
+    upload_root = project_root(user_id, project_id)
+    export_root = project_exports_root(user_id, project_id)
+    db.execute("DELETE FROM projects WHERE id = ? AND user_id = ?", (project_id, user_id))
+    shutil.rmtree(upload_root, ignore_errors=True)
+    shutil.rmtree(export_root, ignore_errors=True)
 
 
 def list_projects(user_id: int) -> list[dict[str, Any]]:

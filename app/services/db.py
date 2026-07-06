@@ -28,6 +28,11 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA temp_store = MEMORY")
     return conn
 
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
 
 @contextmanager
 def connect() -> Iterable[sqlite3.Connection]:
@@ -244,6 +249,11 @@ def init_db() -> None:
             );
             """
         )
+        _ensure_column(conn, "criteria_snapshots", "name", "TEXT")
+        _ensure_column(conn, "prompt_versions", "name", "TEXT")
+        _ensure_column(conn, "topic_runs", "error_type", "TEXT")
+        _ensure_column(conn, "topic_runs", "error_message", "TEXT")
+        _ensure_column(conn, "topic_runs", "error_detail_json", "TEXT")
 
 
 def fetch_one(query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:

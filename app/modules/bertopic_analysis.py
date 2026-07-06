@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -8,6 +10,12 @@ import streamlit as st
 
 from app import ui
 from app.services.bertopic_service import (
+    BERTopicDependencyError,
+    BERTopicInputError,
+    BERTopicRuntimeError,
+    BERTopicTimeoutError,
+    delete_topic_run,
+    get_existing_topic_runs_for_file,
     list_chart_interpretations,
     list_topic_runs,
     load_plotly_artifact,
@@ -19,7 +27,18 @@ from app.services.bertopic_service import (
 from app.services.i18n import current_language, t
 from app.services.llm import get_active_api_config
 from app.services.screening import list_screening_runs
-from app.services.storage import load_project_dataframe, read_dataframe_bytes
+from app.services.storage import (
+    ManagedFileMissingError,
+    load_project_dataframe,
+    read_dataframe_bytes,
+    read_export_dataframe,
+    require_existing_path,
+    save_data_bytes,
+    validate_dataframe,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_state(project_id: int) -> None:
@@ -29,10 +48,27 @@ def _ensure_state(project_id: int) -> None:
     st.session_state.setdefault(f"{prefix}_n_components", 5)
     st.session_state.setdefault(f"{prefix}_min_topic_size", 5)
     st.session_state.setdefault(f"{prefix}_nr_topics", 15)
+    st.session_state.setdefault(f"{prefix}_handled_topic_upload_token", "")
+    st.session_state.setdefault(f"{prefix}_uploaded_data_file_id", None)
 
 
 def _chart_title(chart_key: str) -> str:
     return t(chart_key)
+
+
+def _normalize_topic_upload_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    lower_map = {str(column).strip().lower(): column for column in work.columns}
+    rename_map = {}
+    if "Title" not in work.columns and "title" in lower_map:
+        rename_map[lower_map["title"]] = "Title"
+    if "Abstract" not in work.columns and "abstract" in lower_map:
+        rename_map[lower_map["abstract"]] = "Abstract"
+    if rename_map:
+        work = work.rename(columns=rename_map)
+    if "Record-id" not in work.columns:
+        work.insert(0, "Record-id", [f"topic-upload-{idx + 1}" for idx in range(len(work))])
+    return work
 
 
 def _short_values(values: Any, limit: int = 8) -> str:
@@ -70,18 +106,24 @@ def _chart_context(chart_key: str, chart_payload: dict[str, Any], topic_info_csv
 def _render_chart_card(column, chart_key: str, artifact_path: str, interpretation: str, run_id: int, topic_info_csv: str, user_id: int) -> None:
     with column:
         st.markdown(f"#### {_chart_title(chart_key)}")
-        chart_payload = load_plotly_artifact(artifact_path)
+        try:
+            chart_payload = load_plotly_artifact(artifact_path)
+        except ManagedFileMissingError:
+            logger.exception("BERTopic chart artifact is missing for run_id=%s chart=%s", run_id, chart_key)
+            st.warning(t("result_file_missing"))
+            return
         figure = go.Figure(chart_payload)
-        figure.update_layout(height=360, margin=dict(l=20, r=20, t=40, b=20))
+        figure.update_layout(height=320, margin=dict(l=16, r=16, t=36, b=18), paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(color="#17211f"))
         st.plotly_chart(figure, use_container_width=True, key=f"chart_{run_id}_{chart_key}")
         if st.button(t("generate_interpretation"), key=f"interpret_{run_id}_{chart_key}", disabled=get_active_api_config(user_id) is None, use_container_width=True):
             try:
                 save_chart_interpretation(user_id, run_id, chart_key, _chart_context(chart_key, chart_payload, topic_info_csv), current_language())
                 st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
+            except Exception:
+                logger.exception("BERTopic chart interpretation failed for run_id=%s chart=%s", run_id, chart_key)
+                st.error(t("ai_operation_failed"))
         st.session_state[f"interpretation_value_{run_id}_{chart_key}"] = interpretation
-        st.text_area(t("chart_interpretation"), height=160, key=f"interpretation_value_{run_id}_{chart_key}")
+        st.text_area(t("chart_interpretation"), height=140, key=f"interpretation_value_{run_id}_{chart_key}")
 
 
 def _render_topic_results(project_id: int, user_id: int) -> None:
@@ -90,14 +132,27 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
         return
     ui.section_title(t("topic_overview"))
     selected_run = st.selectbox(t("bertopic_run"), runs, format_func=lambda item: f"#{item['id']} | {item['created_at']} | {item['status']}")
+    if selected_run.get("status") == "failed":
+        message = selected_run.get("error_message") or t("bertopic_failed_unknown")
+        st.warning(f"{t('bertopic_failed_reason')}: {message}")
+        detail = dict(selected_run.get("error_detail") or {})
+        if detail:
+            visible_detail = {key: value for key, value in detail.items() if key != "traceback"}
+            with st.expander(t("bertopic_error_details"), expanded=False):
+                st.json(visible_detail)
     topic_info = pd.DataFrame(selected_run.get("topic_info", []))
     if not topic_info.empty:
         st.dataframe(topic_info, use_container_width=True)
     if selected_run.get("output_path"):
-        out_df = pd.read_csv(selected_run["output_path"])
-        st.dataframe(out_df.head(50), use_container_width=True)
-        with open(selected_run["output_path"], "rb") as fh:
-            st.download_button(t("export_results"), data=fh.read(), file_name="bertopic_results.csv", mime="text/csv")
+        try:
+            output_path = require_existing_path(selected_run["output_path"])
+            out_df = read_export_dataframe(output_path)
+            st.dataframe(out_df.head(50), use_container_width=True)
+            with output_path.open("rb") as fh:
+                st.download_button(t("export_results"), data=fh.read(), file_name=output_path.name, mime="text/csv")
+        except ManagedFileMissingError:
+            logger.exception("BERTopic output file is missing for run_id=%s", selected_run["id"])
+            st.warning(t("result_file_missing"))
 
     interpretations = list_chart_interpretations(int(selected_run["id"]))
     topic_info_csv = topic_info.to_csv(index=False) if not topic_info.empty else "No topic overview available."
@@ -106,32 +161,40 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
         try:
             save_topic_names(user_id, int(selected_run["id"]), topic_info_csv, current_language())
             st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+        except Exception:
+            logger.exception("BERTopic topic naming failed for run_id=%s", selected_run["id"])
+            st.error(t("ai_operation_failed"))
     if llm_col2.button(t("generate_topic_explanation"), key=f"topic_explain_{selected_run['id']}", disabled=get_active_api_config(user_id) is None, use_container_width=True):
         try:
             save_topic_explanation(user_id, int(selected_run["id"]), topic_info_csv, current_language())
             st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+        except Exception:
+            logger.exception("BERTopic topic explanation failed for run_id=%s", selected_run["id"])
+            st.error(t("ai_operation_failed"))
     st.session_state[f"topic_names_value_{selected_run['id']}"] = interpretations.get("topic_names", "")
     st.session_state[f"topic_expl_value_{selected_run['id']}"] = interpretations.get("topic_explanation", "")
-    st.text_area(t("topic_name_suggestions"), height=160, key=f"topic_names_value_{selected_run['id']}")
-    st.text_area(t("topic_explanation"), height=180, key=f"topic_expl_value_{selected_run['id']}")
+    st.text_area(t("topic_name_suggestions"), height=140, key=f"topic_names_value_{selected_run['id']}")
+    st.text_area(t("topic_explanation"), height=150, key=f"topic_expl_value_{selected_run['id']}")
 
     artifacts = selected_run.get("artifacts", {})
     chart_cols = st.columns(3)
     for index, chart_key in enumerate(["barchart", "topics", "hierarchy"]):
         if chart_key in artifacts:
-            _render_chart_card(
-                chart_cols[index],
-                chart_key,
-                artifacts[chart_key],
-                interpretations.get(chart_key, ""),
-                int(selected_run["id"]),
-                topic_info_csv,
-                user_id,
-            )
+            _render_chart_card(chart_cols[index], chart_key, artifacts[chart_key], interpretations.get(chart_key, ""), int(selected_run["id"]), topic_info_csv, user_id)
+
+    pending_delete_id = st.session_state.get("pending_delete_topic_run_id")
+    if pending_delete_id:
+        ui.confirm_dialog(
+            t("confirm_delete_title"),
+            t("delete_topic_result_confirm"),
+            t("confirm_delete"),
+            t("cancel"),
+            lambda: delete_topic_run(project_id, user_id, int(pending_delete_id)),
+            "pending_delete_topic_run_id",
+        )
+    if st.button(t("delete_topic_result"), key=f"delete_topic_run_{selected_run['id']}", use_container_width=True):
+        st.session_state["pending_delete_topic_run_id"] = int(selected_run["id"])
+        st.rerun()
 
 
 def render(project: dict, user: dict) -> None:
@@ -140,40 +203,82 @@ def render(project: dict, user: dict) -> None:
     _ensure_state(project_id)
     prefix = f"bertopic_{project_id}"
     ui.section_title(t("run_bertopic"))
-    source_mode = st.radio(
-        t("source_selection"),
-        ["inherit_screening_results", "upload_new_dataset"],
-        format_func=t,
-        horizontal=True,
-    )
+    source_mode = st.radio(t("source_selection"), ["inherit_screening_results", "upload_new_dataset"], format_func=t, horizontal=True)
     working_df = None
     screening_run_id = None
     data_file_id = None
 
     if source_mode == "inherit_screening_results":
         screening_runs = list_screening_runs(project_id, user_id)
-        completed_runs = [run for run in screening_runs if run["status"] == "completed"]
+        completed_runs = []
+        for run in screening_runs:
+            if run["status"] != "completed" or not run.get("export_path"):
+                continue
+            try:
+                require_existing_path(run["export_path"])
+                completed_runs.append(run)
+            except ManagedFileMissingError:
+                logger.exception("Screening export file is missing for run_id=%s", run["id"])
         if not completed_runs:
-            st.info(t("no_screening_results"))
+            ui.empty_state(t("no_screening_results"), t("source_selection"))
         else:
             chosen_run = st.selectbox(t("screening_run"), completed_runs, format_func=lambda item: f"#{item['id']} | {item['created_at']}")
             screening_run_id = int(chosen_run["id"])
-            source_df = pd.read_csv(chosen_run["export_path"])
-            if "decision" in source_df.columns:
-                source_df = source_df[source_df["decision"].isin(["include", "maybe"])]
-            file_record, base_df = load_project_dataframe(project_id, user_id, int(chosen_run["data_file_id"]))
-            if base_df is not None:
-                merged = base_df.merge(source_df[["record_id"]], left_on="Record-id", right_on="record_id", how="inner")
-                working_df = merged.drop(columns=["record_id"])
-                data_file_id = int(file_record["id"]) if file_record else None
-                st.caption(f"{t('current_data_source')}: {file_record['filename']} | run #{chosen_run['id']}")
+            try:
+                source_df = read_export_dataframe(chosen_run["export_path"])
+                if "decision" in source_df.columns:
+                    source_df = source_df[source_df["decision"] == "include"]
+                if source_df.empty:
+                    st.info(t("bertopic_no_include_records"))
+                else:
+                    file_record, base_df = load_project_dataframe(project_id, user_id, int(chosen_run["data_file_id"]))
+                    if base_df is not None and file_record is not None:
+                        merged = base_df.merge(source_df[["record_id"]], left_on="Record-id", right_on="record_id", how="inner")
+                        working_df = merged.drop(columns=["record_id"])
+                        data_file_id = int(file_record["id"])
+                        st.caption(f"{t('current_data_source')}: {file_record['filename']} | run #{chosen_run['id']}")
+            except ManagedFileMissingError:
+                logger.exception("Inherited BERTopic source file is missing for screening_run_id=%s", screening_run_id)
+                st.warning(t("result_file_missing"))
+            except Exception:
+                logger.exception("Preparing inherited BERTopic source failed for project_id=%s", project_id)
+                st.error(t("bertopic_source_failed"))
     else:
-        upload = st.file_uploader(t("upload_new_dataset"), type=["csv", "xlsx"], key="topic_upload")
+        ui.upload_hint(t("upload_drag_hint"), t("upload_csv_hint"))
+        upload = st.file_uploader(t("upload_new_dataset"), type=["csv", "xlsx", "xls"], key="topic_upload", label_visibility="collapsed")
         if upload is not None:
-            working_df = read_dataframe_bytes(upload.name, upload.getvalue())
-            st.dataframe(working_df.head(10), use_container_width=True)
+            try:
+                upload_bytes = upload.getvalue()
+                upload_token = f"{upload.name}:{len(upload_bytes)}"
+                preview_df = _normalize_topic_upload_dataframe(read_dataframe_bytes(upload.name, upload_bytes))
+                missing = validate_dataframe(preview_df)
+                if missing:
+                    st.error(f"{t('required_columns_missing')}: {', '.join(missing)}")
+                else:
+                    save_name = f"{Path(upload.name).stem or 'topic_dataset'}.csv"
+                    save_bytes = preview_df.to_csv(index=False).encode("utf-8-sig")
+                    if upload_token != st.session_state[f"{prefix}_handled_topic_upload_token"]:
+                        saved = save_data_bytes(user_id, project_id, save_name, save_bytes)
+                        st.session_state[f"{prefix}_handled_topic_upload_token"] = upload_token
+                        st.session_state[f"{prefix}_uploaded_data_file_id"] = int(saved["file_id"])
+                    data_file_id = int(st.session_state[f"{prefix}_uploaded_data_file_id"])
+                    file_record, working_df = load_project_dataframe(project_id, user_id, data_file_id)
+                    st.caption(f"{t('current_data_source')}: {file_record['filename'] if file_record else upload.name}")
+                    st.dataframe((working_df if working_df is not None else preview_df).head(10), use_container_width=True)
+            except ValueError as exc:
+                logger.exception("BERTopic upload validation failed for project_id=%s filename=%s", project_id, upload.name)
+                st.error(f"{t('upload_failed')}: {exc}")
+            except Exception:
+                logger.exception("BERTopic upload failed for project_id=%s filename=%s", project_id, upload.name)
+                st.error(t("upload_failed_generic"))
 
-    if st.button(t("run_bertopic"), use_container_width=True, disabled=working_df is None):
+    existing_topic_runs = get_existing_topic_runs_for_file(project_id, user_id, int(data_file_id)) if data_file_id else []
+    completed_topic_runs = [run for run in existing_topic_runs if run["status"] == "completed"]
+    confirm_overwrite_key = f"{prefix}_confirm_topic_overwrite"
+    if completed_topic_runs:
+        st.info(t("existing_topic_result_hint"))
+
+    def execute_topic_run() -> None:
         params = {
             "random_state": st.session_state[f"{prefix}_random_state"],
             "n_neighbors": st.session_state[f"{prefix}_n_neighbors"],
@@ -182,19 +287,44 @@ def render(project: dict, user: dict) -> None:
             "nr_topics": st.session_state[f"{prefix}_nr_topics"],
         }
         try:
-            result = run_bertopic(
-                project_id,
-                user_id,
-                working_df,
-                "screening" if source_mode == "inherit_screening_results" else "upload",
-                params,
-                data_file_id=data_file_id,
-                screening_run_id=screening_run_id,
-            )
+            with st.status(t("bertopic_running"), expanded=True) as status:
+                st.write(t("bertopic_import_check"))
+                result = run_bertopic(project_id, user_id, working_df, "screening" if source_mode == "inherit_screening_results" else "upload", params, data_file_id=data_file_id, screening_run_id=screening_run_id)
+                status.update(label=f"{t('run_complete')} #{result['run_id']}", state="complete", expanded=False)
+            st.session_state.pop(confirm_overwrite_key, None)
             st.success(f"{t('run_complete')} #{result['run_id']}")
             st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
+        except BERTopicDependencyError:
+            logger.exception("BERTopic dependencies are missing for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("bertopic_dependencies_missing"))
+        except BERTopicInputError:
+            logger.exception("BERTopic input is too small or invalid for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("bertopic_input_too_small"))
+        except BERTopicTimeoutError:
+            logger.exception("BERTopic worker timed out for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("bertopic_timeout"))
+        except BERTopicRuntimeError as exc:
+            logger.exception("BERTopic run failed for project_id=%s user_id=%s", project_id, user_id)
+            st.error(f"{t('bertopic_run_failed')}: {str(exc)[:240]}")
+        except Exception:
+            logger.exception("BERTopic run failed for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("bertopic_run_failed"))
+
+    if st.button(t("run_bertopic"), use_container_width=True, disabled=working_df is None):
+        if completed_topic_runs and not st.session_state.get(confirm_overwrite_key):
+            st.session_state[confirm_overwrite_key] = True
+            st.rerun()
+        else:
+            execute_topic_run()
+
+    if st.session_state.get(confirm_overwrite_key):
+        st.warning(t("overwrite_topic_confirm"))
+        confirm_col, cancel_col, _ = st.columns([1.2, 1.2, 4])
+        if confirm_col.button(t("confirm_run"), key=f"{prefix}_confirm_topic_run", use_container_width=True):
+            execute_topic_run()
+        if cancel_col.button(t("cancel"), key=f"{prefix}_cancel_topic_run", use_container_width=True):
+            st.session_state.pop(confirm_overwrite_key, None)
+            st.rerun()
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.number_input(t("random_state"), step=1, key=f"{prefix}_random_state")

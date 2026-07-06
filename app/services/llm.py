@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
+import os
 import random
 import re
 import time
+from urllib.parse import urlparse
 from typing import Any
 
 import httpx
 
 from . import db
 from .provider_catalog import ProviderSpec, get_provider_spec
+
+
+logger = logging.getLogger(__name__)
+USER_API_FAILURE_MESSAGE = 'API 连接失败，请检查 Base URL、API Key、模型名称、网络代理或后端网络环境。'
 
 
 class LLMRequestError(RuntimeError):
@@ -98,15 +105,26 @@ def _merge_headers(spec: ProviderSpec, api_key: str) -> dict[str, str]:
 
 
 def _resolve_endpoint(spec: ProviderSpec, base_url: str) -> str:
-    base = base_url.rstrip("/")
+    base = (base_url or spec.base_url).strip().rstrip("/")
+    spec_base = spec.base_url.rstrip("/")
+    parsed = urlparse(base)
+    spec_parsed = urlparse(spec_base)
+    if parsed.netloc == spec_parsed.netloc and parsed.path in {"", "/"} and spec_parsed.path not in {"", "/"}:
+        base = spec_base
+
     if spec.transport == "anthropic_compatible":
         if base.endswith("/v1/messages"):
             return base
+        if base.endswith("/messages"):
+            return base
         return f"{base}/v1/messages"
+
     if base.endswith("/chat/completions"):
         return base
+    parsed = urlparse(base)
+    if parsed.path in {"", "/"}:
+        return f"{base}/v1/chat/completions"
     return f"{base}/chat/completions"
-
 
 def _build_payload(spec: ProviderSpec, config: dict[str, Any], messages: list[dict[str, str]], temperature: float) -> dict[str, Any]:
     if spec.transport == "anthropic_compatible":
@@ -186,11 +204,10 @@ def _raise_provider_error(spec: ProviderSpec, config: dict[str, Any], response: 
     model = config["model_name"]
     status = response.status_code
     detail = _extract_provider_error(response)
-    base_message = f"{provider} / {model} request failed with HTTP {status}: {detail}"
+    logger.warning("Provider request failed: provider=%s model=%s status=%s detail=%s", provider, model, status, detail)
     if status == 429:
-        raise LLMRateLimitError(f"{base_message}. 请求过快或额度受限，请稍后重试或切换配置。")
-    raise LLMRequestError(base_message)
-
+        raise LLMRateLimitError("API 请求过快或额度受限，请稍后重试或切换配置。")
+    raise LLMRequestError(USER_API_FAILURE_MESSAGE)
 
 def _chat_completion(config: dict[str, Any], messages: list[dict[str, str]], temperature: float = 0.2) -> str:
     spec = resolve_provider(config)
@@ -199,7 +216,7 @@ def _chat_completion(config: dict[str, Any], messages: list[dict[str, str]], tem
     headers = _merge_headers(spec, config["api_key"])
     retryable_statuses = {408, 429, 500, 502, 503, 504}
 
-    with httpx.Client(timeout=120) as client:
+    with httpx.Client(timeout=120, trust_env=False) as client:
         for attempt in range(3):
             try:
                 response = client.post(endpoint, headers=headers, json=payload)
@@ -210,14 +227,19 @@ def _chat_completion(config: dict[str, Any], messages: list[dict[str, str]], tem
                     continue
                 _raise_provider_error(spec, config, response)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
+                logger.warning(
+                    "Provider transport error: provider=%s model=%s endpoint=%s proxy_env=%s error=%r",
+                    spec.provider_name,
+                    config["model_name"],
+                    endpoint,
+                    {key: os.getenv(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL") if os.getenv(key)},
+                    exc,
+                )
                 if attempt < 2:
                     time.sleep(_retry_delay_seconds(None, attempt))
                     continue
-                raise LLMRequestError(
-                    f"{spec.provider_name} / {config['model_name']} request failed due to network error: {exc}"
-                ) from exc
-    raise LLMRequestError(f"{spec.provider_name} / {config['model_name']} request failed after retries.")
-
+                raise LLMRequestError(USER_API_FAILURE_MESSAGE) from exc
+    raise LLMRequestError(USER_API_FAILURE_MESSAGE)
 
 def chat_text(user_id: int, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
     config = get_active_api_config(user_id)

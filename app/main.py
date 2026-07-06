@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
 import sys
 from html import escape
@@ -18,6 +20,9 @@ from app.services import db
 from app.services.auth import authenticate_user, bootstrap_auth, login_user, logout_user, register_user
 from app.services.i18n import language_options, set_language, t
 from app.services.projects import get_project
+
+
+logger = logging.getLogger(__name__)
 
 
 MODULES = {
@@ -50,76 +55,173 @@ def _user_initial(user: dict) -> str:
     return display[:1].upper()
 
 
-def render_auth() -> None:
+def _set_auth_view(view: str) -> None:
+    st.session_state["auth_view"] = view
+
+
+def _is_valid_email(email: str) -> bool:
+    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()) is not None
+
+
+def _current_language_label(language_map: dict[str, str], current_lang: str) -> str:
+    return next((label for label, value in language_map.items() if value == current_lang), next(iter(language_map.keys())))
+
+
+def _render_auth_topbar() -> None:
+    language_map = language_options()
+    current_lang = st.session_state.get("language", "zh-CN")
+    current_label = _current_language_label(language_map, current_lang)
+    brand_col, spacer_col, lang_col, login_col, register_col = st.columns([3.2, 2.2, 1.5, 1.0, 1.25], vertical_alignment="center")
+    with brand_col:
+        st.markdown(
+            f"""
+            <div class='brand-block brand-compact'>
+              <span class='brand-mark'>L</span>
+              <span class='brand-title'>{escape(t('app_title'))}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with spacer_col:
+        st.empty()
+    with lang_col:
+        selected_label = st.radio(
+            t("language"),
+            list(language_map.keys()),
+            index=list(language_map.keys()).index(current_label),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="auth_language_choice",
+        )
+        selected_language = language_map[selected_label]
+        if selected_language != current_lang:
+            set_language(selected_language)
+            st.rerun()
+    with login_col:
+        if st.button(t("login"), key="auth_nav_login", use_container_width=True):
+            _set_auth_view("login")
+            st.rerun()
+    with register_col:
+        if st.button(t("register"), key="auth_nav_register", use_container_width=True):
+            _set_auth_view("register")
+            st.rerun()
+
+
+def _render_auth_home() -> None:
     st.markdown(
         f"""
-        <div class='hero-card'>
-          <div class='brand-block' style='padding-bottom:0.5rem;margin-bottom:0;'>
-            <span class='brand-mark'>L</span>
-            <span class='brand-title'>{escape(t('app_title'))}</span>
-          </div>
-          <p>{escape(t('theme_hint'))}</p>
-        </div>
+        <section class='app-hero'>
+          <p class='kicker'>{escape(t('homepage_kicker'))}</p>
+          <h2>{escape(t('homepage_headline'))}</h2>
+          <p>{escape(t('homepage_intro'))}</p>
+        </section>
         """,
         unsafe_allow_html=True,
     )
-    language_map = language_options()
-    current_lang = st.session_state.get("language", "zh-CN")
-    current_label = next((label for label, value in language_map.items() if value == current_lang), "中文")
-    label = st.selectbox(t("language"), list(language_map.keys()), index=list(language_map.keys()).index(current_label))
-    set_language(language_map[label])
+    flow_col, use_col = st.columns([1.05, 0.95], gap="medium")
+    with flow_col:
+        ui.surface(
+            t("homepage_flow_title"),
+            "\n".join([t("homepage_flow_1"), t("homepage_flow_2"), t("homepage_flow_3")]),
+        )
+    with use_col:
+        ui.surface(
+            t("homepage_use_cases_title"),
+            "\n".join([t("homepage_use_cases_1"), t("homepage_use_cases_2"), t("homepage_use_cases_3")]),
+        )
 
-    login_col, register_col = st.columns(2)
-    with login_col:
-        st.markdown(f"### {t('login')}")
-        with st.form("login_form"):
-            username = st.text_input(t("username"))
-            password = st.text_input(t("password"), type="password")
-            submitted = st.form_submit_button(t("sign_in"), use_container_width=True)
-        if submitted:
-            user = authenticate_user(username, password)
+
+def _render_login_form() -> None:
+    ui.page_header(t("login"), t("homepage_intro"))
+    with st.form("login_form"):
+        email = st.text_input(t("email"), key="login_email")
+        password = st.text_input(t("password"), type="password", key="login_password")
+        submitted = st.form_submit_button(t("sign_in"), use_container_width=True)
+    if submitted:
+        if not email.strip() or not password:
+            st.error(t("required_fields_missing"))
+            return
+        user = authenticate_user(email, password)
+        if user:
+            login_user(user)
+            st.rerun()
+        st.error(t("invalid_credentials"))
+    if st.button(t("back_home"), key="login_back_home"):
+        _set_auth_view("home")
+        st.rerun()
+
+
+def _render_register_form() -> None:
+    ui.page_header(t("register"), t("homepage_intro"))
+    with st.form("register_form"):
+        username = st.text_input(t("username"), key="register_username")
+        email = st.text_input(t("email"), key="register_email")
+        password = st.text_input(t("password"), type="password", key="register_password")
+        confirm_password = st.text_input(t("confirm_password"), type="password", key="register_confirm_password")
+        submitted = st.form_submit_button(t("sign_up"), use_container_width=True)
+    if submitted:
+        if not username.strip() or not email.strip() or not password or not confirm_password:
+            st.error(t("required_fields_missing"))
+            return
+        if not _is_valid_email(email):
+            st.error(t("invalid_email"))
+            return
+        if password != confirm_password:
+            st.error(t("passwords_do_not_match"))
+            return
+        try:
+            register_user(username, email, password, display_name=username, preferred_language=st.session_state["language"])
+            user = authenticate_user(email, password)
             if user:
                 login_user(user)
                 st.rerun()
             st.error(t("operation_failed"))
-    with register_col:
-        st.markdown(f"### {t('register')}")
-        with st.form("register_form"):
-            username = st.text_input(t("username"), key="register_username")
-            email = st.text_input(t("email"))
-            display_name = st.text_input(t("display_name"))
-            password = st.text_input(t("password"), type="password", key="register_password")
-            submitted = st.form_submit_button(t("sign_up"), use_container_width=True)
-        if submitted:
-            try:
-                register_user(username, email, password, display_name, st.session_state["language"])
-                user = authenticate_user(username, password)
-                if user:
-                    login_user(user)
-                    st.rerun()
-            except sqlite3.IntegrityError:
-                st.error(t("username_or_email_exists"))
-            except Exception:
-                st.error(t("operation_failed"))
+        except sqlite3.IntegrityError:
+            st.error(t("username_or_email_exists"))
+        except Exception:
+            logger.exception("User registration failed")
+            st.error(t("operation_failed"))
+    if st.button(t("back_home"), key="register_back_home"):
+        _set_auth_view("home")
+        st.rerun()
+
+
+def render_auth() -> None:
+    st.session_state.setdefault("auth_view", "home")
+    _render_auth_topbar()
+    st.markdown("<div class='row-separator'></div>", unsafe_allow_html=True)
+    auth_view = st.session_state.get("auth_view", "home")
+    if auth_view == "login":
+        _render_login_form()
+    elif auth_view == "register":
+        _render_register_form()
+    else:
+        _render_auth_home()
 
 
 def render_shell_header(user: dict, title: str, project: dict | None = None) -> None:
-    subtitle = f"{t('active_project')}: {project['name']}" if project else t("projects")
-    st.markdown(
-        f"""
-        <div class="shell-header">
-          <div class="shell-title">
-            <h1>{escape(title)}</h1>
-            <p>{escape(subtitle)}</p>
-          </div>
-          <div class="shell-user">
-            <span>{escape(user['display_name'])} / {escape(user['username'])}</span>
-            <span class="avatar-dot">{escape(_user_initial(user))}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    subtitle = f"{t('active_project')}: {project['name']}" if project else ""
+    title_col, account_col = st.columns([5, 1.45], vertical_alignment="center")
+    with title_col:
+        st.markdown(
+            f"""
+            <section class="shell-title">
+              <h1>{escape(title)}</h1>
+              <p>{escape(subtitle)}</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+    display_name = user.get("display_name") or user.get("username") or t("current_user")
+    with account_col:
+        with st.popover(f"{_user_initial(user)}  {display_name}", use_container_width=True):
+            st.caption(user.get("email", ""))
+            if st.button(t("profile"), key=f"top_profile_{project['id'] if project else 'root'}", use_container_width=True):
+                st.session_state["current_module"] = "profile"
+                st.rerun()
+            if st.button(t("logout"), key=f"top_logout_{project['id'] if project else 'root'}", use_container_width=True):
+                logout_user()
+                st.rerun()
 
 
 def _render_nav_item(option: str, current: str, prefix: str) -> None:
@@ -140,7 +242,7 @@ def render_sidebar(user: dict, options: list[str], current: str, project: dict |
         f"""
         <div class="brand-block">
           <span class="brand-mark">L</span>
-          <span class="brand-title">Dashboard</span>
+          <span class="brand-title">Literature Lab</span>
         </div>
         <div class="sidebar-caption">{escape(t('app_title'))}</div>
         """,
@@ -153,9 +255,6 @@ def render_sidebar(user: dict, options: list[str], current: str, project: dict |
     if project and st.sidebar.button(t("back_to_projects"), use_container_width=True):
         st.session_state["current_project_id"] = None
         st.session_state["current_module"] = "projects"
-        st.rerun()
-    if st.sidebar.button(t("logout"), use_container_width=True):
-        logout_user()
         st.rerun()
 
 
