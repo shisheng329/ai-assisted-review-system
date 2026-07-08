@@ -1,0 +1,61 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["app", "tests"]
+extend-exclude = [
+    "data",
+    "uploads",
+    "exports",
+    "tmp_validation_service",
+    "tmp_validation_service_*",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.deptry]
+known_first_party = ["app"]
+exclude = [
+    "data",
+    "uploads",
+    "exports",
+    "tmp_validation_service",
+    "tmp_validation_service_*",
+]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "bertopic",
+    "sentence-transformers",
+    "transformers",
+    "umap-learn",
+]
+
+[tool.vulture]
+paths = ["app", "tests"]
+min_confidence = 80
+exclude = [
+    "data",
+    "uploads",
+    "exports",
+    "tmp_validation_service",
+    "tmp_validation_service_*",
+]

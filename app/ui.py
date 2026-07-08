@@ -4,6 +4,7 @@ from html import escape
 from typing import Iterable
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 STATUS_VARIANTS = {
@@ -140,6 +141,73 @@ def readonly_panel(title: str, body: str, height: int = 320) -> None:
         unsafe_allow_html=True,
     )
 
+
+def ai_result_panel(title: str, body: str, height: int = 220) -> None:
+    escaped_title = escape(title)
+    escaped_body = escape(body or "")
+    components.html(
+        f"""
+        <section class="ai-result-panel">
+          <div class="ai-result-title">{escaped_title}</div>
+          <textarea readonly aria-label="{escaped_title}">{escaped_body}</textarea>
+        </section>
+        <style>
+          html, body {{
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
+            font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+          }}
+          .ai-result-panel {{
+            box-sizing: border-box;
+            height: {int(height)}px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #d7e3df;
+            background: #ffffff;
+            border-radius: 10px;
+            overflow: hidden;
+          }}
+          .ai-result-title {{
+            flex: 0 0 auto;
+            padding: 0.58rem 0.75rem;
+            border-bottom: 1px solid #d7e3df;
+            background: #eef8f4;
+            color: #087b69;
+            font-weight: 760;
+            font-size: 0.86rem;
+          }}
+          textarea {{
+            flex: 1 1 auto;
+            width: 100%;
+            min-height: 0;
+            box-sizing: border-box;
+            overflow-y: auto;
+            overflow-x: auto;
+            resize: none;
+            margin: 0;
+            padding: 0.85rem;
+            border: 0;
+            outline: 0;
+            background: #ffffff;
+            color: #17211f;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            user-select: text;
+            cursor: text;
+            font-family: Consolas, "Microsoft YaHei", monospace;
+            font-size: 13.5px;
+            line-height: 1.62;
+          }}
+          textarea:focus {{
+            box-shadow: inset 0 0 0 1px rgba(16, 163, 127, 0.28);
+          }}
+        </style>
+        """,
+        height=int(height) + 4,
+        scrolling=False,
+    )
 
 def info_row(label: str, value: object, status_html: str = "") -> None:
     value_text = "" if value is None else str(value)

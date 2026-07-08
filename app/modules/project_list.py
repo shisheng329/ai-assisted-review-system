@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app import session_state as ss
 from app import ui
 from app.services.i18n import t
 from app.services.projects import create_project, delete_project, list_projects, update_project
@@ -19,20 +20,20 @@ def _project_form(user_id: int, key_prefix: str, project: dict | None = None) ->
         return
     if project:
         update_project(user_id, int(project["id"]), name, description)
-        st.session_state.pop("editing_project_id", None)
+        ss.pop(ss.EDITING_PROJECT_ID, None)
         st.success(t("project_saved"))
         st.rerun()
     project_id = create_project(user_id, name, description)
-    st.session_state["current_project_id"] = project_id
-    st.session_state["current_module"] = "dashboard"
-    st.session_state["show_create_project"] = False
+    ss.set_value(ss.CURRENT_PROJECT_ID, project_id)
+    ss.set_value(ss.CURRENT_MODULE, "dashboard")
+    ss.set_value(ss.SHOW_CREATE_PROJECT, False)
     st.success(t("success_created"))
     st.rerun()
 
 
 def _open_project(project_id: int) -> None:
-    st.session_state["current_project_id"] = project_id
-    st.session_state["current_module"] = "dashboard"
+    ss.set_value(ss.CURRENT_PROJECT_ID, project_id)
+    ss.set_value(ss.CURRENT_MODULE, "dashboard")
     st.rerun()
 
 
@@ -48,11 +49,11 @@ def render(user: dict) -> None:
 
     action_col, spacer_col = st.columns([1.2, 5], vertical_alignment="center")
     if action_col.button(t("new_project"), key="new_project_button", use_container_width=True):
-        st.session_state["show_create_project"] = not st.session_state.get("show_create_project", False)
+        ss.set_value(ss.SHOW_CREATE_PROJECT, not ss.get(ss.SHOW_CREATE_PROJECT, False))
     with spacer_col:
         st.caption(t("project_management_hint"))
 
-    if st.session_state.get("show_create_project", False):
+    if ss.get(ss.SHOW_CREATE_PROJECT, False):
         with st.expander(t("new_project"), expanded=True):
             _project_form(user_id, "create_project")
 
@@ -63,11 +64,11 @@ def render(user: dict) -> None:
 
     for project in projects:
         project_id = int(project["id"])
-        if st.session_state.get("editing_project_id") == project_id:
+        if ss.get(ss.EDITING_PROJECT_ID) == project_id:
             with st.expander(f"{t('edit_project')}: {project['name']}", expanded=True):
                 _project_form(user_id, f"edit_{project_id}", project)
                 if st.button(t("cancel"), key=f"cancel_edit_{project_id}"):
-                    st.session_state.pop("editing_project_id", None)
+                    ss.pop(ss.EDITING_PROJECT_ID, None)
                     st.rerun()
             ui.row_separator()
             continue
@@ -81,24 +82,24 @@ def render(user: dict) -> None:
         if actions[0].button(t("open"), key=f"open_project_{project_id}", use_container_width=True):
             _open_project(project_id)
         if actions[1].button(t("edit"), key=f"edit_project_{project_id}", use_container_width=True):
-            st.session_state["editing_project_id"] = project_id
+            ss.set_value(ss.EDITING_PROJECT_ID, project_id)
             st.rerun()
         if actions[2].button(t("delete"), key=f"delete_project_{project_id}", use_container_width=True):
-            st.session_state["pending_delete_project_id"] = project_id
+            ss.set_value(ss.PENDING_DELETE_PROJECT_ID, project_id)
             st.rerun()
 
-        if st.session_state.get("pending_delete_project_id") == project_id:
+        if ss.get(ss.PENDING_DELETE_PROJECT_ID) == project_id:
             st.warning(t("delete_project_confirm"))
             confirm_col, cancel_col, _ = st.columns([1.2, 1.2, 4])
             if confirm_col.button(t("confirm_delete"), key=f"confirm_delete_project_{project_id}", use_container_width=True):
                 delete_project(user_id, project_id)
-                if st.session_state.get("current_project_id") == project_id:
-                    st.session_state["current_project_id"] = None
-                    st.session_state["current_module"] = "projects"
-                st.session_state.pop("pending_delete_project_id", None)
+                if ss.get(ss.CURRENT_PROJECT_ID) == project_id:
+                    ss.set_value(ss.CURRENT_PROJECT_ID, None)
+                    ss.set_value(ss.CURRENT_MODULE, "projects")
+                ss.pop(ss.PENDING_DELETE_PROJECT_ID, None)
                 st.success(t("project_deleted"))
                 st.rerun()
             if cancel_col.button(t("cancel"), key=f"cancel_delete_project_{project_id}", use_container_width=True):
-                st.session_state.pop("pending_delete_project_id", None)
+                ss.pop(ss.PENDING_DELETE_PROJECT_ID, None)
                 st.rerun()
         ui.row_separator()

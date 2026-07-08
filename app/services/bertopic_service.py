@@ -552,7 +552,16 @@ def delete_topic_run(project_id: int, user_id: int, run_id: int) -> None:
 
 
 def list_topic_runs(project_id: int, user_id: int) -> list[dict[str, Any]]:
-    rows = db.fetch_all("SELECT * FROM topic_runs WHERE project_id = ? AND user_id = ? ORDER BY created_at DESC", (project_id, user_id))
+    rows = db.fetch_all(
+        """
+        SELECT topic_runs.*, data_files.filename AS data_filename
+        FROM topic_runs
+        LEFT JOIN data_files ON data_files.id = topic_runs.data_file_id
+        WHERE topic_runs.project_id = ? AND topic_runs.user_id = ?
+        ORDER BY topic_runs.created_at DESC
+        """,
+        (project_id, user_id),
+    )
     results = []
     for row in rows:
         item = dict(row)

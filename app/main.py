@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app import session_state as ss
 from app import ui
 from app.modules import bertopic_analysis, dashboard, data_input, llm_screening, pdf_extraction, profile, project_list
 from app.services import db
@@ -45,9 +46,9 @@ NAV_MARKS = {
 
 
 def init_session() -> None:
-    st.session_state.setdefault("language", "zh-CN")
-    st.session_state.setdefault("current_module", "projects")
-    st.session_state.setdefault("current_project_id", None)
+    ss.set_default(ss.LANGUAGE, "zh-CN")
+    ss.set_default(ss.CURRENT_MODULE, "projects")
+    ss.set_default(ss.CURRENT_PROJECT_ID, None)
 
 
 def _user_initial(user: dict) -> str:
@@ -56,7 +57,7 @@ def _user_initial(user: dict) -> str:
 
 
 def _set_auth_view(view: str) -> None:
-    st.session_state["auth_view"] = view
+    ss.set_value(ss.AUTH_VIEW, view)
 
 
 def _is_valid_email(email: str) -> bool:
@@ -69,7 +70,7 @@ def _current_language_label(language_map: dict[str, str], current_lang: str) -> 
 
 def _render_auth_topbar() -> None:
     language_map = language_options()
-    current_lang = st.session_state.get("language", "zh-CN")
+    current_lang = ss.get(ss.LANGUAGE, "zh-CN")
     current_label = _current_language_label(language_map, current_lang)
     brand_col, spacer_col, lang_col, login_col, register_col = st.columns([3.2, 2.2, 1.5, 1.0, 1.25], vertical_alignment="center")
     with brand_col:
@@ -170,7 +171,7 @@ def _render_register_form() -> None:
             st.error(t("passwords_do_not_match"))
             return
         try:
-            register_user(username, email, password, display_name=username, preferred_language=st.session_state["language"])
+            register_user(username, email, password, display_name=username, preferred_language=ss.get(ss.LANGUAGE, "zh-CN"))
             user = authenticate_user(email, password)
             if user:
                 login_user(user)
@@ -187,10 +188,10 @@ def _render_register_form() -> None:
 
 
 def render_auth() -> None:
-    st.session_state.setdefault("auth_view", "home")
+    ss.set_default(ss.AUTH_VIEW, "home")
     _render_auth_topbar()
     st.markdown("<div class='row-separator'></div>", unsafe_allow_html=True)
-    auth_view = st.session_state.get("auth_view", "home")
+    auth_view = ss.get(ss.AUTH_VIEW, "home")
     if auth_view == "login":
         _render_login_form()
     elif auth_view == "register":
@@ -217,7 +218,7 @@ def render_shell_header(user: dict, title: str, project: dict | None = None) -> 
         with st.popover(f"{_user_initial(user)}  {display_name}", use_container_width=True):
             st.caption(user.get("email", ""))
             if st.button(t("profile"), key=f"top_profile_{project['id'] if project else 'root'}", use_container_width=True):
-                st.session_state["current_module"] = "profile"
+                ss.set_value(ss.CURRENT_MODULE, "profile")
                 st.rerun()
             if st.button(t("logout"), key=f"top_logout_{project['id'] if project else 'root'}", use_container_width=True):
                 logout_user()
@@ -233,7 +234,7 @@ def _render_nav_item(option: str, current: str, prefix: str) -> None:
             unsafe_allow_html=True,
         )
     elif st.sidebar.button(f"{mark}  {label}", key=f"{prefix}_{option}", use_container_width=True):
-        st.session_state["current_module"] = option
+        ss.set_value(ss.CURRENT_MODULE, option)
         st.rerun()
 
 
@@ -253,25 +254,25 @@ def render_sidebar(user: dict, options: list[str], current: str, project: dict |
 
     st.sidebar.markdown("---")
     if project and st.sidebar.button(t("back_to_projects"), use_container_width=True):
-        st.session_state["current_project_id"] = None
-        st.session_state["current_module"] = "projects"
+        ss.set_value(ss.CURRENT_PROJECT_ID, None)
+        ss.set_value(ss.CURRENT_MODULE, "projects")
         st.rerun()
 
 
 def render_authenticated() -> None:
-    user = st.session_state["current_user"]
-    current_project_id = st.session_state.get("current_project_id")
+    user = ss.get(ss.CURRENT_USER)
+    current_project_id = ss.get(ss.CURRENT_PROJECT_ID)
     project = get_project(int(current_project_id), int(user["id"])) if current_project_id else None
     if current_project_id and not project:
-        st.session_state["current_project_id"] = None
-        st.session_state["current_module"] = "projects"
+        ss.set_value(ss.CURRENT_PROJECT_ID, None)
+        ss.set_value(ss.CURRENT_MODULE, "projects")
         project = None
 
     if project is None:
         options = ["projects", "profile"]
-        current = st.session_state.get("current_module", "projects")
+        current = ss.get(ss.CURRENT_MODULE, "projects")
         current = current if current in options else "projects"
-        st.session_state["current_module"] = current
+        ss.set_value(ss.CURRENT_MODULE, current)
         render_sidebar(user, options, current)
         render_shell_header(user, t(current), None)
         if current == "projects":
@@ -281,9 +282,9 @@ def render_authenticated() -> None:
         return
 
     options = ["dashboard", "data_input", "screening", "bertopic", "pdf_extraction", "profile"]
-    current = st.session_state.get("current_module", "dashboard")
+    current = ss.get(ss.CURRENT_MODULE, "dashboard")
     current = current if current in options else "dashboard"
-    st.session_state["current_module"] = current
+    ss.set_value(ss.CURRENT_MODULE, current)
     render_sidebar(user, options, current, project)
     render_shell_header(user, t(current), project)
     if current == "profile":
@@ -298,7 +299,7 @@ def main() -> None:
     init_session()
     bootstrap_auth()
     ui.apply_global_styles()
-    if st.session_state.get("current_user"):
+    if ss.get(ss.CURRENT_USER):
         render_authenticated()
     else:
         render_auth()

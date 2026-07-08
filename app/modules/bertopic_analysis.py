@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app import session_state as ss
 from app import ui
 from app.services.bertopic_service import (
     BERTopicDependencyError,
@@ -29,6 +30,7 @@ from app.services.llm import get_active_api_config
 from app.services.screening import list_screening_runs
 from app.services.storage import (
     ManagedFileMissingError,
+    get_project_files,
     load_project_dataframe,
     read_dataframe_bytes,
     read_export_dataframe,
@@ -103,27 +105,127 @@ def _chart_context(chart_key: str, chart_payload: dict[str, Any], topic_info_csv
     )
 
 
-def _render_chart_card(column, chart_key: str, artifact_path: str, interpretation: str, run_id: int, topic_info_csv: str, user_id: int) -> None:
+def _topic_count(topic_info: pd.DataFrame) -> int:
+    if topic_info.empty:
+        return 0
+    if "Topic" not in topic_info.columns:
+        return int(len(topic_info))
+    topics = pd.to_numeric(topic_info["Topic"], errors="coerce")
+    return int(topics[topics != -1].dropna().nunique())
+
+
+def _topic_chart_height(topic_count: int) -> int:
+    topic_count = max(1, int(topic_count or 1))
+    return min(560, max(300, 240 + min(topic_count, 12) * 24))
+
+
+def _apply_chart_layout(figure: go.Figure, chart_key: str, topic_count: int) -> go.Figure:
+    height = _topic_chart_height(topic_count)
+    figure.update_layout(
+        height=height,
+        margin=dict(l=24, r=20, t=42, b=32),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        font=dict(color="#17211f", size=11),
+        autosize=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    figure.update_xaxes(automargin=True)
+    figure.update_yaxes(automargin=True, tickfont=dict(size=10 if topic_count > 8 else 11))
+    if chart_key == "hierarchy":
+        figure.update_layout(margin=dict(l=36, r=20, t=42, b=32))
+    if chart_key == "topics":
+        figure.update_traces(marker=dict(line=dict(width=1, color="#ffffff")), selector=dict(mode="markers"))
+    return figure
+
+
+def _format_created_at(value: object) -> str:
+    return str(value or "").replace("T", " ")[:16]
+
+
+def _format_topic_run_label(item: dict[str, Any]) -> str:
+    filename = item.get("data_filename") or t("unknown_data_source")
+    if item.get("screening_run_id"):
+        source = f"{t('screening_run_short')} #{item['screening_run_id']}"
+    elif item.get("source_type") == "upload":
+        source = t("direct_topic_source")
+    else:
+        source = str(item.get("source_type") or t("direct_topic_source"))
+    return f"{filename} | {source} | {t('topic_run_short')} #{item['id']} | {item.get('status', '')} | {_format_created_at(item.get('created_at'))}"
+
+
+def _format_screening_run_label(item: dict[str, Any], file_names: dict[int, str]) -> str:
+    filename = file_names.get(int(item.get("data_file_id") or 0), t("unknown_data_source"))
+    return f"{filename} | {t('screening_run_short')} #{item['id']} | {item.get('status', '')} | {_format_created_at(item.get('created_at'))}"
+
+
+def _render_ai_text_result(
+    run_id: int,
+    result_key: str,
+    title_key: str,
+    button_key: str,
+    current_text: str,
+    disabled: bool,
+    generate_fn,
+    result_height: int = 220,
+) -> None:
+    open_key = f"bertopic_ai_result_open_{run_id}_{result_key}"
+
+    def generate_result() -> None:
+        try:
+            with st.status(t("ai_generating"), expanded=False):
+                generate_fn()
+            st.session_state[open_key] = True
+            st.rerun()
+        except Exception:
+            logger.exception("BERTopic AI text generation failed for run_id=%s key=%s", run_id, result_key)
+            st.error(t("ai_operation_failed"))
+
+    if current_text:
+        if open_key not in st.session_state:
+            st.session_state[open_key] = True
+        is_open = bool(st.session_state.get(open_key, True))
+        if is_open:
+            ui.ai_result_panel(t(title_key), current_text, height=result_height)
+
+        action_cols = st.columns(2)
+        if action_cols[0].button(f"{t('regenerate')} {t(button_key)}", key=f"{result_key}_{run_id}_regenerate", disabled=disabled, use_container_width=True):
+            generate_result()
+        toggle_label = t("collapse") if is_open else t("view")
+        if action_cols[1].button(toggle_label, key=f"{result_key}_{run_id}_toggle", use_container_width=True):
+            st.session_state[open_key] = not is_open
+            st.rerun()
+        return
+
+    if st.button(t(button_key), key=f"{result_key}_{run_id}_generate", disabled=disabled, use_container_width=True):
+        generate_result()
+
+def _render_chart_card(column, chart_key: str, artifact_path: str, interpretation: str, run_id: int, topic_info_csv: str, user_id: int, topic_count: int) -> None:
     with column:
         st.markdown(f"#### {_chart_title(chart_key)}")
         try:
             chart_payload = load_plotly_artifact(artifact_path)
+            figure = _apply_chart_layout(go.Figure(chart_payload), chart_key, topic_count)
+            st.plotly_chart(figure, use_container_width=True, key=f"chart_{run_id}_{chart_key}")
         except ManagedFileMissingError:
             logger.exception("BERTopic chart artifact is missing for run_id=%s chart=%s", run_id, chart_key)
             st.warning(t("result_file_missing"))
             return
-        figure = go.Figure(chart_payload)
-        figure.update_layout(height=320, margin=dict(l=16, r=16, t=36, b=18), paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font=dict(color="#17211f"))
-        st.plotly_chart(figure, use_container_width=True, key=f"chart_{run_id}_{chart_key}")
-        if st.button(t("generate_interpretation"), key=f"interpret_{run_id}_{chart_key}", disabled=get_active_api_config(user_id) is None, use_container_width=True):
-            try:
-                save_chart_interpretation(user_id, run_id, chart_key, _chart_context(chart_key, chart_payload, topic_info_csv), current_language())
-                st.rerun()
-            except Exception:
-                logger.exception("BERTopic chart interpretation failed for run_id=%s chart=%s", run_id, chart_key)
-                st.error(t("ai_operation_failed"))
-        st.session_state[f"interpretation_value_{run_id}_{chart_key}"] = interpretation
-        st.text_area(t("chart_interpretation"), height=140, key=f"interpretation_value_{run_id}_{chart_key}")
+        except Exception:
+            logger.exception("BERTopic chart rendering failed for run_id=%s chart=%s", run_id, chart_key)
+            st.warning(t("result_file_missing"))
+            return
+
+        _render_ai_text_result(
+            run_id,
+            f"interpret_{chart_key}",
+            "chart_interpretation",
+            "generate_interpretation",
+            interpretation,
+            get_active_api_config(user_id) is None,
+            lambda: save_chart_interpretation(user_id, run_id, chart_key, _chart_context(chart_key, chart_payload, topic_info_csv), current_language()),
+            result_height=220,
+        )
 
 
 def _render_topic_results(project_id: int, user_id: int) -> None:
@@ -131,7 +233,7 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
     if not runs:
         return
     ui.section_title(t("topic_overview"))
-    selected_run = st.selectbox(t("bertopic_run"), runs, format_func=lambda item: f"#{item['id']} | {item['created_at']} | {item['status']}")
+    selected_run = st.selectbox(t("bertopic_run"), runs, format_func=_format_topic_run_label)
     if selected_run.get("status") == "failed":
         message = selected_run.get("error_message") or t("bertopic_failed_unknown")
         st.warning(f"{t('bertopic_failed_reason')}: {message}")
@@ -141,6 +243,7 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
             with st.expander(t("bertopic_error_details"), expanded=False):
                 st.json(visible_detail)
     topic_info = pd.DataFrame(selected_run.get("topic_info", []))
+    topic_count = _topic_count(topic_info)
     if not topic_info.empty:
         st.dataframe(topic_info, use_container_width=True)
     if selected_run.get("output_path"):
@@ -153,36 +256,42 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
         except ManagedFileMissingError:
             logger.exception("BERTopic output file is missing for run_id=%s", selected_run["id"])
             st.warning(t("result_file_missing"))
+        except Exception:
+            logger.exception("BERTopic output file could not be displayed for run_id=%s", selected_run["id"])
+            st.warning(t("result_file_missing"))
 
-    interpretations = list_chart_interpretations(int(selected_run["id"]))
+    run_id = int(selected_run["id"])
+    interpretations = list_chart_interpretations(run_id)
     topic_info_csv = topic_info.to_csv(index=False) if not topic_info.empty else "No topic overview available."
     llm_col1, llm_col2 = st.columns(2)
-    if llm_col1.button(t("generate_topic_names"), key=f"topic_names_{selected_run['id']}", disabled=get_active_api_config(user_id) is None, use_container_width=True):
-        try:
-            save_topic_names(user_id, int(selected_run["id"]), topic_info_csv, current_language())
-            st.rerun()
-        except Exception:
-            logger.exception("BERTopic topic naming failed for run_id=%s", selected_run["id"])
-            st.error(t("ai_operation_failed"))
-    if llm_col2.button(t("generate_topic_explanation"), key=f"topic_explain_{selected_run['id']}", disabled=get_active_api_config(user_id) is None, use_container_width=True):
-        try:
-            save_topic_explanation(user_id, int(selected_run["id"]), topic_info_csv, current_language())
-            st.rerun()
-        except Exception:
-            logger.exception("BERTopic topic explanation failed for run_id=%s", selected_run["id"])
-            st.error(t("ai_operation_failed"))
-    st.session_state[f"topic_names_value_{selected_run['id']}"] = interpretations.get("topic_names", "")
-    st.session_state[f"topic_expl_value_{selected_run['id']}"] = interpretations.get("topic_explanation", "")
-    st.text_area(t("topic_name_suggestions"), height=140, key=f"topic_names_value_{selected_run['id']}")
-    st.text_area(t("topic_explanation"), height=150, key=f"topic_expl_value_{selected_run['id']}")
+    with llm_col1:
+        _render_ai_text_result(
+            run_id,
+            "topic_names",
+            "topic_name_suggestions",
+            "generate_topic_names",
+            interpretations.get("topic_names", ""),
+            get_active_api_config(user_id) is None,
+            lambda: save_topic_names(user_id, run_id, topic_info_csv, current_language()),
+        )
+    with llm_col2:
+        _render_ai_text_result(
+            run_id,
+            "topic_explain",
+            "topic_explanation",
+            "generate_topic_explanation",
+            interpretations.get("topic_explanation", ""),
+            get_active_api_config(user_id) is None,
+            lambda: save_topic_explanation(user_id, run_id, topic_info_csv, current_language()),
+        )
 
     artifacts = selected_run.get("artifacts", {})
     chart_cols = st.columns(3)
     for index, chart_key in enumerate(["barchart", "topics", "hierarchy"]):
         if chart_key in artifacts:
-            _render_chart_card(chart_cols[index], chart_key, artifacts[chart_key], interpretations.get(chart_key, ""), int(selected_run["id"]), topic_info_csv, user_id)
+            _render_chart_card(chart_cols[index], chart_key, artifacts[chart_key], interpretations.get(chart_key, ""), run_id, topic_info_csv, user_id, topic_count)
 
-    pending_delete_id = st.session_state.get("pending_delete_topic_run_id")
+    pending_delete_id = ss.get(ss.PENDING_DELETE_TOPIC_RUN_ID)
     if pending_delete_id:
         ui.confirm_dialog(
             t("confirm_delete_title"),
@@ -190,10 +299,10 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
             t("confirm_delete"),
             t("cancel"),
             lambda: delete_topic_run(project_id, user_id, int(pending_delete_id)),
-            "pending_delete_topic_run_id",
+            ss.PENDING_DELETE_TOPIC_RUN_ID,
         )
     if st.button(t("delete_topic_result"), key=f"delete_topic_run_{selected_run['id']}", use_container_width=True):
-        st.session_state["pending_delete_topic_run_id"] = int(selected_run["id"])
+        ss.set_value(ss.PENDING_DELETE_TOPIC_RUN_ID, int(selected_run["id"]))
         st.rerun()
 
 
@@ -210,6 +319,7 @@ def render(project: dict, user: dict) -> None:
 
     if source_mode == "inherit_screening_results":
         screening_runs = list_screening_runs(project_id, user_id)
+        file_names = {int(item["id"]): item["filename"] for item in get_project_files(project_id, user_id)}
         completed_runs = []
         for run in screening_runs:
             if run["status"] != "completed" or not run.get("export_path"):
@@ -222,7 +332,7 @@ def render(project: dict, user: dict) -> None:
         if not completed_runs:
             ui.empty_state(t("no_screening_results"), t("source_selection"))
         else:
-            chosen_run = st.selectbox(t("screening_run"), completed_runs, format_func=lambda item: f"#{item['id']} | {item['created_at']}")
+            chosen_run = st.selectbox(t("screening_run"), completed_runs, format_func=lambda item: _format_screening_run_label(item, file_names))
             screening_run_id = int(chosen_run["id"])
             try:
                 source_df = read_export_dataframe(chosen_run["export_path"])

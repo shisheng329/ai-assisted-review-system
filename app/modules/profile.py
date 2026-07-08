@@ -4,6 +4,7 @@ import logging
 
 import streamlit as st
 
+from app import session_state as ss
 from app import ui
 from app.services.i18n import language_options, set_language, t
 from app.services.llm import (
@@ -29,7 +30,7 @@ def _render_account_info(user: dict) -> str:
             ui.info_row(t("email"), user["email"])
 
         language_map = language_options()
-        current_lang = st.session_state.get("language", user.get("preferred_language", "zh-CN"))
+        current_lang = ss.get(ss.LANGUAGE, user.get("preferred_language", "zh-CN"))
         selected_label = next((label for label, value in language_map.items() if value == current_lang), next(iter(language_map.keys())))
         with lang_col:
             language_label = st.radio(
@@ -98,7 +99,7 @@ def _render_api_configs(user: dict) -> None:
     active_config = get_active_api_config(user_id)
     active_id = int(active_config["id"]) if active_config else None
 
-    pending_delete_id = st.session_state.get("delete_api_config_id")
+    pending_delete_id = ss.get(ss.DELETE_API_CONFIG_ID)
     if pending_delete_id:
         ui.confirm_dialog(
             t("confirm_delete_title"),
@@ -106,7 +107,7 @@ def _render_api_configs(user: dict) -> None:
             t("confirm_delete"),
             t("cancel"),
             lambda: delete_api_config(user_id, int(pending_delete_id)),
-            "delete_api_config_id",
+            ss.DELETE_API_CONFIG_ID,
         )
 
     ui.section_title(t("saved_api_config_list"), f"{len(configs)}")
@@ -142,7 +143,7 @@ def _render_api_configs(user: dict) -> None:
                 activate_api_config(user_id, config_id)
                 st.rerun()
             if action_cols[1].button(t("delete"), key=f"delete_api_{config_id}", use_container_width=True):
-                st.session_state["delete_api_config_id"] = config_id
+                ss.set_value(ss.DELETE_API_CONFIG_ID, config_id)
                 st.rerun()
             ui.row_separator()
 

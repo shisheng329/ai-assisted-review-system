@@ -4,6 +4,7 @@ import logging
 
 import streamlit as st
 
+from app import session_state as ss
 from app import ui
 from app.services.i18n import t
 from app.services.llm import get_active_api_config
@@ -46,15 +47,15 @@ def _render_upload(project_id: int, user_id: int) -> None:
         if missing:
             st.error(f"{t('required_columns_missing')}: {', '.join(missing)}")
             return
-        st.session_state["pending_dataset_upload"] = {"name": upload.name, "bytes": upload.getvalue()}
+        ss.set_value(ss.PENDING_DATASET_UPLOAD, {"name": upload.name, "bytes": upload.getvalue()})
         ui.section_title(t("upload_preview"), upload.name)
         st.dataframe(preview_df.head(10), use_container_width=True)
         if st.button(t("save_to_project"), key="save_pending_dataset", use_container_width=True):
-            pending = st.session_state.get("pending_dataset_upload")
+            pending = ss.get(ss.PENDING_DATASET_UPLOAD)
             if pending:
                 saved = save_data_bytes(user_id, project_id, pending["name"], pending["bytes"])
                 st.success(f"{t('success_saved')} ({saved['row_count']} rows)")
-                st.session_state.pop("pending_dataset_upload", None)
+                ss.pop(ss.PENDING_DATASET_UPLOAD, None)
                 st.rerun()
     except ValueError:
         logger.exception("Dataset validation failed for project_id=%s filename=%s", project_id, upload.name)
@@ -68,7 +69,7 @@ def _render_files(project_id: int, user_id: int) -> None:
     files = get_project_files(project_id, user_id)
     result_counts = get_data_file_result_counts(project_id, user_id)
 
-    pending_delete_id = st.session_state.get("pending_delete_data_file_id")
+    pending_delete_id = ss.get(ss.PENDING_DELETE_DATA_FILE_ID)
     if pending_delete_id:
         ui.confirm_dialog(
             t("confirm_delete_title"),
@@ -76,7 +77,7 @@ def _render_files(project_id: int, user_id: int) -> None:
             t("confirm_delete"),
             t("cancel"),
             lambda: delete_data_file(project_id, user_id, int(pending_delete_id)),
-            "pending_delete_data_file_id",
+            ss.PENDING_DELETE_DATA_FILE_ID,
         )
 
     ui.section_title(t("uploaded_files"), t("file_list_scroll_hint"))
@@ -104,7 +105,7 @@ def _render_files(project_id: int, user_id: int) -> None:
                 st.rerun()
             cols[3].caption(f"{t('screening_results')}: {counts['screening']} | {t('topic_overview')}: {counts['topic']}")
             if cols[4].button(t("delete"), key=f"delete_file_{file_id}", use_container_width=True):
-                st.session_state["pending_delete_data_file_id"] = file_id
+                ss.set_value(ss.PENDING_DELETE_DATA_FILE_ID, file_id)
                 st.rerun()
             ui.row_separator()
 

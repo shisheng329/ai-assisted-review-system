@@ -503,13 +503,11 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
     _apply_pending_loads(prefix, project_id, user_id)
     _apply_pending_dimension_action(prefix)
 
-    ui.page_title(t("screening"), t("screening_source_hint"))
     file_record = get_active_data_file(project_id, user_id)
     if not file_record:
         ui.empty_state(t("no_active_data_file"))
         return
 
-    ui.info_row(t("current_data_source"), f"{file_record['filename']} ({file_record['row_count']} rows)")
     try:
         _, df = load_project_dataframe(project_id, user_id, int(file_record["id"]))
     except ManagedFileMissingError:
@@ -517,16 +515,13 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
         st.error(t("managed_file_missing"))
         return
     except Exception:
-        logger.exception("Active data source preview failed for project_id=%s user_id=%s", project_id, user_id)
+        logger.exception("Active data source loading failed for project_id=%s user_id=%s", project_id, user_id)
         st.error(t("data_preview_failed"))
         return
 
     if df is None or df.empty:
         ui.empty_state(t("no_data"))
         return
-
-    with st.expander(t("preview"), expanded=False):
-        st.dataframe(df.head(20), use_container_width=True)
 
     st.text_area(t("review_topic"), key=f"{prefix}_review_topic", height=88)
     st.text_area(t("key_points"), key=f"{prefix}_key_points", height=88)
@@ -583,11 +578,14 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
     if not can_assemble:
         st.info(t("criteria_unsaved_before_prompt"))
 
+    st.divider()
+    _render_criteria_library(prefix, project_id, user_id)
+
+    st.divider()
     prompt_text = st.text_area(t("prompt_text"), key=f"{prefix}_prompt_editor", height=300)
     st.session_state[f"{prefix}_prompt"] = prompt_text
 
-    prompt_actions = st.columns(2)
-    if prompt_actions[0].button(t("review_with_ai"), use_container_width=True, disabled=not prompt_text.strip()):
+    if st.button(t("review_with_ai"), key=f"{prefix}_review_prompt_button", use_container_width=True, disabled=not prompt_text.strip()):
         try:
             bilingual = create_bilingual_review(user_id, prompt_text, st.session_state.get(f"{prefix}_prompt_components"))
             st.session_state[f"{prefix}_bilingual"] = bilingual
@@ -596,8 +594,14 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
             logger.exception("Bilingual prompt review failed for project_id=%s user_id=%s", project_id, user_id)
             st.error(t("api_connection_failed"))
 
-    prompt_name = prompt_actions[1].text_input(t("prompt_name"), key=f"{prefix}_save_prompt_name", label_visibility="collapsed", placeholder=t("prompt_name"))
-    if st.button(t("save_prompt"), use_container_width=True, disabled=not prompt_text.strip()):
+    bilingual = st.session_state.get(f"{prefix}_bilingual")
+    if bilingual:
+        ui.section_title(t("bilingual_review"))
+        _render_bilingual_review(prefix, bilingual)
+
+    prompt_name_col, save_prompt_col = st.columns([2.4, 1], vertical_alignment="bottom")
+    prompt_name = prompt_name_col.text_input(t("prompt_name"), key=f"{prefix}_save_prompt_name", placeholder=t("prompt_name"))
+    if save_prompt_col.button(t("save_prompt"), use_container_width=True, disabled=not prompt_text.strip()):
         cleaned_prompt_name = prompt_name.strip()
         if not cleaned_prompt_name:
             st.error(t("prompt_name_required"))
@@ -605,13 +609,7 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
             version_id = save_prompt_version(project_id, user_id, prompt_text, st.session_state.get(f"{prefix}_bilingual"), name=cleaned_prompt_name)
             st.success(f"{t('prompt_saved')} #{version_id}")
 
-    bilingual = st.session_state.get(f"{prefix}_bilingual")
-    if bilingual:
-        ui.section_title(t("bilingual_review"))
-        _render_bilingual_review(prefix, bilingual)
-
     st.divider()
-    _render_criteria_library(prefix, project_id, user_id)
     _render_prompt_library(prefix, project_id, user_id)
 
     st.divider()

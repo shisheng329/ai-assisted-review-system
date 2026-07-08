@@ -9,6 +9,8 @@ from typing import Any
 import streamlit as st
 import streamlit.components.v1 as components
 
+from app import session_state as ss
+
 from . import db
 from .utils import utc_now_iso
 
@@ -107,30 +109,30 @@ def get_cookie_token() -> str | None:
 
 
 def bootstrap_auth() -> None:
-    if st.session_state.get("current_user"):
+    if ss.get(ss.CURRENT_USER):
         return
     token = get_cookie_token()
     if token:
-        st.session_state[COOKIE_NAME] = token
+        ss.set_value(COOKIE_NAME, token)
         user = get_user_by_session(token)
         if user:
-            st.session_state["current_user"] = user
-            st.session_state["language"] = user.get("preferred_language", "zh-CN")
+            ss.set_value(ss.CURRENT_USER, user)
+            ss.set_value(ss.LANGUAGE, user.get("preferred_language", "zh-CN"))
 
 
 def login_user(user: dict[str, Any]) -> None:
     token = create_session(int(user["id"]))
-    st.session_state["current_user"] = user
-    st.session_state[COOKIE_NAME] = token
-    st.session_state["language"] = user.get("preferred_language", "zh-CN")
+    ss.set_value(ss.CURRENT_USER, user)
+    ss.set_value(COOKIE_NAME, token)
+    ss.set_value(ss.LANGUAGE, user.get("preferred_language", "zh-CN"))
     set_cookie(token)
 
 
 def logout_user() -> None:
-    token = st.session_state.get(COOKIE_NAME) or get_cookie_token()
+    token = ss.get(COOKIE_NAME) or get_cookie_token()
     if token:
         db.execute("DELETE FROM sessions WHERE token = ?", (token,))
-    st.session_state.pop("current_user", None)
-    st.session_state.pop(COOKIE_NAME, None)
-    st.session_state.pop("current_project_id", None)
+    ss.pop(ss.CURRENT_USER, None)
+    ss.pop(COOKIE_NAME, None)
+    ss.pop(ss.CURRENT_PROJECT_ID, None)
     set_cookie(None)
