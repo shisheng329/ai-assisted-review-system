@@ -32,27 +32,37 @@ def save_criteria_snapshot(
     project_id: int,
     user_id: int,
     review_topic: str,
-    key_points: str,
-    inclusion_draft: str,
-    exclusion_draft: str,
-    dimensions: list[dict[str, str]],
-    ai_expanded: dict[str, Any] | None,
+    review_type: str = "",
+    review_objective: str = "",
+    target_literature_type: str = "",
+    key_points: str = "",
+    inclusion_draft: str = "",
+    exclusion_draft: str = "",
+    dimensions: list[dict[str, Any]] | None = None,
+    ai_expanded: dict[str, Any] | None = None,
     name: str = "",
 ) -> int:
     return db.execute(
         """
-        INSERT INTO criteria_snapshots (project_id, user_id, name, review_topic, key_points, inclusion_draft, exclusion_draft, dimensions_json, ai_expanded_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO criteria_snapshots (
+            project_id, user_id, name, review_topic, review_type, review_objective,
+            target_literature_type, key_points, inclusion_draft, exclusion_draft,
+            dimensions_json, ai_expanded_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
             user_id,
             name.strip(),
             review_topic,
+            review_type,
+            review_objective,
+            target_literature_type,
             key_points,
             inclusion_draft,
             exclusion_draft,
-            json_dumps(normalize_dimensions(dimensions)),
+            json_dumps(normalize_dimensions(dimensions or [])),
             json_dumps(ai_expanded) if ai_expanded else None,
             utc_now_iso(),
         ),
@@ -61,9 +71,12 @@ def save_criteria_snapshot(
 
 def _format_snapshot(row: Any) -> dict[str, Any]:
     item = dict(row)
-    item["name"] = item.get("name") or _fallback_name("未命名标准", int(item["id"]))
-    item["dimensions"] = json_loads(item["dimensions_json"], [])
-    item["ai_expanded"] = json_loads(item["ai_expanded_json"], None)
+    item["name"] = item.get("name") or _fallback_name("Unnamed criteria", int(item["id"]))
+    item["review_type"] = item.get("review_type") or ""
+    item["review_objective"] = item.get("review_objective") or ""
+    item["target_literature_type"] = item.get("target_literature_type") or ""
+    item["dimensions"] = normalize_dimensions(json_loads(item.get("dimensions_json"), []))
+    item["ai_expanded"] = _normalize_expanded_payload(json_loads(item.get("ai_expanded_json"), None))
     return item
 
 
@@ -90,31 +103,70 @@ def delete_criteria_snapshot(project_id: int, user_id: int, snapshot_id: int) ->
     )
 
 
-def expand_criteria_with_ai(user_id: int, review_topic: str, key_points: str, inclusion_draft: str, exclusion_draft: str, dimensions: list[dict[str, str]]) -> dict[str, str]:
+
+def _normalize_expanded_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if any(key in payload for key in ("review_topic", "inclusion_criteria", "dimensions")):
+        return {
+            "review_topic": str(payload.get("review_topic") or payload.get("REVIEW_TOPIC") or "").strip(),
+            "review_type": str(payload.get("review_type") or "").strip(),
+            "review_objective": str(payload.get("review_objective") or "").strip(),
+            "target_literature_type": str(payload.get("target_literature_type") or "").strip(),
+            "inclusion_criteria": str(payload.get("inclusion_criteria") or payload.get("INCLUSION_CRITERIA") or "").strip(),
+            "exclusion_criteria": str(payload.get("exclusion_criteria") or payload.get("EXCLUSION_CRITERIA") or "").strip(),
+            "dimensions": normalize_dimensions(payload.get("dimensions") if isinstance(payload.get("dimensions"), list) else []),
+            "raw": payload.get("raw"),
+        }
+    if any(key in payload for key in ("REVIEW_TOPIC", "INCLUSION_CRITERIA", "DIMENSION_RULES")):
+        return {
+            "review_topic": str(payload.get("REVIEW_TOPIC") or "").strip(),
+            "review_type": "",
+            "review_objective": "",
+            "target_literature_type": "",
+            "inclusion_criteria": str(payload.get("INCLUSION_CRITERIA") or "").strip(),
+            "exclusion_criteria": str(payload.get("EXCLUSION_CRITERIA") or "").strip(),
+            "dimensions": parse_dimension_rules(str(payload.get("DIMENSION_RULES") or ""), []),
+            "raw": payload.get("raw"),
+        }
+    return None
+
+
+def expand_criteria_with_ai(
+    user_id: int,
+    review_topic: str,
+    review_type: str = "",
+    review_objective: str = "",
+    target_literature_type: str = "",
+    inclusion_draft: str = "",
+    exclusion_draft: str = "",
+    dimensions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     raw = chat_text(
         user_id,
-        "You improve literature screening criteria into clear academic English.",
-        build_ai_expansion_prompt(review_topic, key_points, inclusion_draft, exclusion_draft, dimensions),
+        "You improve literature screening criteria into structured academic English and return JSON only.",
+        build_ai_expansion_prompt(
+            review_topic,
+            review_type,
+            review_objective,
+            target_literature_type,
+            inclusion_draft,
+            exclusion_draft,
+            dimensions or [],
+        ),
         temperature=0.2,
     )
-    sections = {"raw": raw}
-    current_key = None
-    buffer: list[str] = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped in {"REVIEW_TOPIC", "INCLUSION_CRITERIA", "EXCLUSION_CRITERIA", "DIMENSION_RULES"}:
-            if current_key:
-                sections[current_key] = "\n".join(buffer).strip()
-            current_key = stripped
-            buffer = []
-            continue
-        buffer.append(line)
-    if current_key:
-        sections[current_key] = "\n".join(buffer).strip()
-    return sections
+    parsed = _extract_json_object(raw)
+    normalized = _normalize_expanded_payload({**parsed, "raw": raw}) if parsed else None
+    if not normalized:
+        raise ValueError("AI expansion did not return valid structured JSON.")
+    fallback_dims = normalize_dimensions(dimensions or [])
+    if not normalized.get("dimensions") and fallback_dims:
+        normalized["dimensions"] = fallback_dims
+    return normalized
 
 
-def parse_dimension_rules(dimension_rules: str, fallback_dimensions: list[dict[str, str]]) -> list[dict[str, str]]:
+def parse_dimension_rules(dimension_rules: str, fallback_dimensions: list[dict[str, Any]]) -> list[dict[str, str]]:
     fallback = normalize_dimensions(fallback_dimensions)
     parsed_by_id: dict[str, dict[str, str]] = {}
     for line in (dimension_rules or "").splitlines():
@@ -125,27 +177,52 @@ def parse_dimension_rules(dimension_rules: str, fallback_dimensions: list[dict[s
         dim_id = match.group(1).upper()
         body = match.group(2).strip()
         if " - " in body:
-            name, description = body.split(" - ", 1)
+            field_name, definition = body.split(" - ", 1)
         elif ": " in body:
-            name, description = body.split(": ", 1)
+            field_name, definition = body.split(": ", 1)
         else:
-            name, description = body, ""
-        parsed_by_id[dim_id] = {"id": dim_id, "name": name.strip(), "description": description.strip()}
+            field_name, definition = body, ""
+        parsed_by_id[dim_id] = {"id": dim_id, "field_name": field_name.strip(), "definition": definition.strip()}
     if not parsed_by_id:
         return fallback
     results = []
-    for fallback_item in fallback:
-        item = parsed_by_id.get(fallback_item["id"], fallback_item)
-        results.append({"id": fallback_item["id"], "name": item.get("name", ""), "description": item.get("description", "")})
-    return results
+    for idx, fallback_item in enumerate(fallback or parsed_by_id.values(), start=1):
+        item = parsed_by_id.get(fallback_item.get("id", f"D{idx}"), fallback_item)
+        merged = {**fallback_item, **item, "id": f"D{idx}"}
+        results.append(merged)
+    return normalize_dimensions(results)
 
 
-def assemble_prompt(review_topic: str, inclusion_criteria: str, exclusion_criteria: str, dimensions: list[dict[str, str]]) -> str:
-    return build_screening_prompt(review_topic, inclusion_criteria, exclusion_criteria, dimensions)
+def _is_old_prompt_call(target_literature_type: Any, dimensions: Any) -> bool:
+    return isinstance(target_literature_type, list) and dimensions is None
 
 
-def assemble_prompt_components(review_topic: str, inclusion_criteria: str, exclusion_criteria: str, dimensions: list[dict[str, str]]) -> dict[str, object]:
-    return build_prompt_components(review_topic, inclusion_criteria, exclusion_criteria, dimensions)
+def assemble_prompt(
+    review_topic: str,
+    review_type: str = "",
+    review_objective: str = "",
+    target_literature_type: str | list[dict[str, Any]] = "",
+    inclusion_criteria: str = "",
+    exclusion_criteria: str = "",
+    dimensions: list[dict[str, Any]] | None = None,
+) -> str:
+    if _is_old_prompt_call(target_literature_type, dimensions):
+        return build_screening_prompt(review_topic, review_type, review_objective, target_literature_type)
+    return build_screening_prompt(review_topic, review_type, review_objective, target_literature_type, inclusion_criteria, exclusion_criteria, dimensions or [])
+
+
+def assemble_prompt_components(
+    review_topic: str,
+    review_type: str = "",
+    review_objective: str = "",
+    target_literature_type: str | list[dict[str, Any]] = "",
+    inclusion_criteria: str = "",
+    exclusion_criteria: str = "",
+    dimensions: list[dict[str, Any]] | None = None,
+) -> dict[str, object]:
+    if _is_old_prompt_call(target_literature_type, dimensions):
+        return build_prompt_components(review_topic, review_type, review_objective, target_literature_type)
+    return build_prompt_components(review_topic, review_type, review_objective, target_literature_type, inclusion_criteria, exclusion_criteria, dimensions or [])
 
 
 def save_prompt_version(project_id: int, user_id: int, prompt_text: str, bilingual_json: dict[str, str] | None = None, name: str = "") -> int:
@@ -234,6 +311,40 @@ def _format_records_for_prompt(batch: list[dict[str, Any]]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def _allowed_reason_codes(normalized_dims: list[dict[str, str]]) -> set[str]:
+    codes = {"NA", "E_SCOPE", "M_SCOPE"}
+    for dim in normalized_dims:
+        codes.add(f"E_{dim['id']}")
+        codes.add(f"M_{dim['id']}")
+    return codes
+
+
+def _fallback_reason_code(decision: str, normalized_dims: list[dict[str, str]]) -> str:
+    if decision == "include":
+        return "NA"
+    if normalized_dims:
+        return f"{'E' if decision == 'exclude' else 'M'}_{normalized_dims[0]['id']}"
+    return "E_SCOPE" if decision == "exclude" else "M_SCOPE"
+
+
+def _clean_reason_code(value: Any, decision: str, normalized_dims: list[dict[str, str]]) -> str:
+    code = str(value or "").strip().upper().replace(" ", "")
+    code = re.sub(r"^([EM])_?D(\d+)$", r"\1_D\2", code)
+    if decision == "include":
+        return "NA"
+    if code in _allowed_reason_codes(normalized_dims):
+        if decision == "exclude" and code.startswith("E_"):
+            return code
+        if decision == "maybe" and code.startswith("M_"):
+            return code
+    return _fallback_reason_code(decision, normalized_dims)
+
+
+def _coerce_dimension_value(value: Any) -> str:
+    cleaned = str(value or "unclear").strip().lower()
+    return cleaned if cleaned in {"yes", "no", "unclear"} else "unclear"
+
+
 def _coerce_output(output: dict[str, str], source: dict[str, Any], normalized_dims: list[dict[str, str]]) -> dict[str, Any]:
     decision = (output.get("decision") or "maybe").strip().lower()
     if decision not in {"include", "exclude", "maybe"}:
@@ -241,15 +352,17 @@ def _coerce_output(output: dict[str, str], source: dict[str, Any], normalized_di
     confidence = (output.get("confidence") or "low").strip().lower()
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
+    rationale = str(output.get("rationale") or "The main unresolved domain remains unclear from the title and abstract.").strip()
+    rationale = " ".join(rationale.split())
     return {
         "row_index": source["row_index"],
         "record_id": output.get("record_id", source["record_id"]),
         "title": output.get("title", source["title"]),
         "decision": decision,
         "confidence": confidence,
-        "primary_reason_code": output.get("primary_reason_code", "M2"),
-        "rationale": output.get("rationale", "The main unresolved domain remains unclear from the title and abstract."),
-        "dimensions": {dim["id"]: (output.get(dim["id"], "unclear") or "unclear").strip().lower() for dim in normalized_dims},
+        "primary_reason_code": _clean_reason_code(output.get("primary_reason_code"), decision, normalized_dims),
+        "rationale": rationale,
+        "dimensions": {dim["id"]: _coerce_dimension_value(output.get(dim["id"])) for dim in normalized_dims},
     }
 
 

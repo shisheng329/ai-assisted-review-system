@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,41 @@ from .utils import ensure_dir, exports_root, json_dumps, json_loads, safe_filena
 
 
 REQUIRED_COLUMNS = ["Record-id", "Title", "Abstract"]
+
+
+def _column_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+_COLUMN_ALIASES = {
+    "Record-id": {"recordid", "id"},
+    "Title": {"title"},
+    "Abstract": {"abstract"},
+}
+
+
+def standardize_bibliographic_columns(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    rename_map: dict[object, str] = {}
+    used_targets = set(result.columns)
+    for column in result.columns:
+        key = _column_key(column)
+        for target, aliases in _COLUMN_ALIASES.items():
+            if target not in used_targets and key in aliases:
+                rename_map[column] = target
+                used_targets.add(target)
+                break
+            if column != target and target in result.columns:
+                continue
+            if key in aliases:
+                rename_map[column] = target
+                used_targets.add(target)
+                break
+    if rename_map:
+        result = result.rename(columns=rename_map)
+    if "Record-id" not in result.columns and {"Title", "Abstract"}.issubset(result.columns):
+        result.insert(0, "Record-id", [f"row-{idx + 1}" for idx in range(len(result))])
+    return result
 
 
 class ManagedFileMissingError(FileNotFoundError):
@@ -38,18 +74,18 @@ def read_dataframe(file_path: str | Path) -> pd.DataFrame:
         raise ManagedFileMissingError(str(path))
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(path)
+        return standardize_bibliographic_columns(pd.read_csv(path))
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(path)
+        return standardize_bibliographic_columns(pd.read_excel(path))
     raise ValueError(f"Unsupported file type: {suffix}")
 
 
 def read_dataframe_bytes(filename: str, file_bytes: bytes) -> pd.DataFrame:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(BytesIO(file_bytes))
+        return standardize_bibliographic_columns(pd.read_csv(BytesIO(file_bytes)))
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(BytesIO(file_bytes))
+        return standardize_bibliographic_columns(pd.read_excel(BytesIO(file_bytes)))
     raise ValueError(f"Unsupported file type: {suffix}")
 
 

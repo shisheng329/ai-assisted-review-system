@@ -4,7 +4,6 @@ import json
 import logging
 from typing import Any
 
-import pandas as pd
 import plotly.express as px
 import streamlit as st
 
@@ -26,19 +25,34 @@ from app.services.screening import (
     list_criteria_snapshots,
     list_prompt_versions,
     list_screening_runs,
-    parse_dimension_rules,
     run_screening,
     save_criteria_snapshot,
     save_prompt_version,
 )
 from app.services.storage import ManagedFileMissingError, get_active_data_file, load_project_dataframe, require_existing_path
+from app.services.prompting import DIMENSION_FIELDS, normalize_dimensions as normalize_prompt_dimensions
 
 
 logger = logging.getLogger(__name__)
 
 
+REVIEW_TYPE_PLACEHOLDER = "例如：scoping review / systematic review / mapping review / rapid review"
+TARGET_LITERATURE_TYPE_PLACEHOLDER = (
+    "例如：primary empirical studies / intervention studies / qualitative studies / "
+    "modelling studies / mixed-methods studies / policy documents"
+)
+
+
+def _empty_dimension() -> dict[str, str]:
+    item = {field: "" for field in DIMENSION_FIELDS}
+    item.update({"id": "", "name": "", "description": ""})
+    return item
+
+
 def _default_dimensions() -> list[dict[str, str]]:
-    return [{"id": "D1", "name": "", "description": ""}]
+    item = _empty_dimension()
+    item["id"] = "D1"
+    return [item]
 
 
 def _prefix(project_id: int) -> str:
@@ -48,12 +62,18 @@ def _prefix(project_id: int) -> str:
 def _ensure_state(prefix: str) -> None:
     defaults: dict[str, Any] = {
         f"{prefix}_review_topic": "",
+        f"{prefix}_review_type": "",
+        f"{prefix}_review_objective": "",
+        f"{prefix}_target_literature_type": "",
         f"{prefix}_key_points": "",
         f"{prefix}_inclusion": "",
         f"{prefix}_exclusion": "",
         f"{prefix}_dimensions": _default_dimensions(),
         f"{prefix}_ai_expanded": None,
         f"{prefix}_expanded_topic": "",
+        f"{prefix}_expanded_type": "",
+        f"{prefix}_expanded_objective": "",
+        f"{prefix}_expanded_target_type": "",
         f"{prefix}_expanded_include": "",
         f"{prefix}_expanded_exclude": "",
         f"{prefix}_expanded_dims": "",
@@ -84,31 +104,30 @@ def _ensure_state(prefix: str) -> None:
 
 
 def _normalize_dimensions(dimensions: list[dict[str, str]]) -> list[dict[str, str]]:
-    normalized: list[dict[str, str]] = []
-    for idx, dim in enumerate(dimensions or _default_dimensions()):
-        normalized.append({
-            "id": f"D{idx + 1}",
-            "name": str(dim.get("name", "") or ""),
-            "description": str(dim.get("description", "") or ""),
-        })
+    normalized = normalize_prompt_dimensions(dimensions or _default_dimensions())
     return normalized or _default_dimensions()
+
+
+def _dimension_field_label(field: str) -> str:
+    return t(f"dimension_{field}")
 
 
 def _sync_dimension_widget_state(prefix: str, dimensions: list[dict[str, str]]) -> None:
     for idx, dim in enumerate(_normalize_dimensions(dimensions)):
-        st.session_state[f"{prefix}_dim_name_{idx}"] = dim.get("name", "")
-        st.session_state[f"{prefix}_dim_desc_{idx}"] = dim.get("description", "")
+        for field in DIMENSION_FIELDS:
+            st.session_state[f"{prefix}_dim_{field}_{idx}"] = dim.get(field, "")
 
 
 def _collect_dimensions_from_widgets(prefix: str) -> list[dict[str, str]]:
     dimensions = _normalize_dimensions(st.session_state.get(f"{prefix}_dimensions", _default_dimensions()))
     collected: list[dict[str, str]] = []
     for idx, dim in enumerate(dimensions):
-        collected.append({
-            "id": f"D{idx + 1}",
-            "name": str(st.session_state.get(f"{prefix}_dim_name_{idx}", dim.get("name", "")) or ""),
-            "description": str(st.session_state.get(f"{prefix}_dim_desc_{idx}", dim.get("description", "")) or ""),
-        })
+        item = {"id": f"D{idx + 1}"}
+        for field in DIMENSION_FIELDS:
+            item[field] = str(st.session_state.get(f"{prefix}_dim_{field}_{idx}", dim.get(field, "")) or "")
+        item["name"] = item["field_name"]
+        item["description"] = item["definition"]
+        collected.append(item)
     return collected or _default_dimensions()
 
 
@@ -119,7 +138,7 @@ def _apply_pending_dimension_action(prefix: str) -> None:
         kind, index = action
         index = int(index)
         if kind == "add":
-            dimensions.insert(index + 1, {"id": "", "name": "", "description": ""})
+            dimensions.insert(index + 1, _empty_dimension())
         elif kind == "remove" and len(dimensions) > 1:
             dimensions.pop(index)
     dimensions = _normalize_dimensions(dimensions)
@@ -127,28 +146,61 @@ def _apply_pending_dimension_action(prefix: str) -> None:
     _sync_dimension_widget_state(prefix, dimensions)
 
 
-def _set_ai_expanded_state(prefix: str, ai_expanded: dict[str, str] | None) -> None:
+def _json_dump_dimensions(dimensions: list[dict[str, str]]) -> str:
+    return json.dumps(_normalize_dimensions(dimensions), ensure_ascii=False, indent=2)
+
+
+def _json_load_dimensions(raw: str, fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return _normalize_dimensions(fallback)
+    return _normalize_dimensions(parsed if isinstance(parsed, list) else fallback)
+
+
+def _set_ai_expanded_state(prefix: str, ai_expanded: dict[str, Any] | None) -> None:
     st.session_state[f"{prefix}_ai_expanded"] = ai_expanded
-    st.session_state[f"{prefix}_expanded_topic"] = (ai_expanded or {}).get("REVIEW_TOPIC", "")
-    st.session_state[f"{prefix}_expanded_include"] = (ai_expanded or {}).get("INCLUSION_CRITERIA", "")
-    st.session_state[f"{prefix}_expanded_exclude"] = (ai_expanded or {}).get("EXCLUSION_CRITERIA", "")
-    st.session_state[f"{prefix}_expanded_dims"] = (ai_expanded or {}).get("DIMENSION_RULES", "")
+    if not ai_expanded:
+        st.session_state[f"{prefix}_expanded_topic"] = ""
+        st.session_state[f"{prefix}_expanded_type"] = ""
+        st.session_state[f"{prefix}_expanded_objective"] = ""
+        st.session_state[f"{prefix}_expanded_target_type"] = ""
+        st.session_state[f"{prefix}_expanded_include"] = ""
+        st.session_state[f"{prefix}_expanded_exclude"] = ""
+        st.session_state[f"{prefix}_expanded_dims"] = ""
+        return
+    payload = ai_expanded
+    dimensions = _normalize_dimensions(payload.get("dimensions") or st.session_state.get(f"{prefix}_dimensions", _default_dimensions()))
+    st.session_state[f"{prefix}_expanded_topic"] = payload.get("review_topic", "")
+    st.session_state[f"{prefix}_expanded_type"] = payload.get("review_type", "")
+    st.session_state[f"{prefix}_expanded_objective"] = payload.get("review_objective", "")
+    st.session_state[f"{prefix}_expanded_target_type"] = payload.get("target_literature_type", "")
+    st.session_state[f"{prefix}_expanded_include"] = payload.get("inclusion_criteria", "")
+    st.session_state[f"{prefix}_expanded_exclude"] = payload.get("exclusion_criteria", "")
+    st.session_state[f"{prefix}_expanded_dims"] = _json_dump_dimensions(dimensions)
 
 
-def _current_ai_expanded(prefix: str) -> dict[str, str] | None:
+def _current_ai_expanded(prefix: str) -> dict[str, Any] | None:
     keys = (
         f"{prefix}_expanded_topic",
+        f"{prefix}_expanded_type",
+        f"{prefix}_expanded_objective",
+        f"{prefix}_expanded_target_type",
         f"{prefix}_expanded_include",
         f"{prefix}_expanded_exclude",
         f"{prefix}_expanded_dims",
     )
     if not st.session_state.get(f"{prefix}_ai_expanded") and not any(st.session_state.get(key) for key in keys):
         return None
+    fallback = st.session_state.get(f"{prefix}_dimensions", _default_dimensions())
     return {
-        "REVIEW_TOPIC": st.session_state.get(f"{prefix}_expanded_topic", "").strip(),
-        "INCLUSION_CRITERIA": st.session_state.get(f"{prefix}_expanded_include", "").strip(),
-        "EXCLUSION_CRITERIA": st.session_state.get(f"{prefix}_expanded_exclude", "").strip(),
-        "DIMENSION_RULES": st.session_state.get(f"{prefix}_expanded_dims", "").strip(),
+        "review_topic": st.session_state.get(f"{prefix}_expanded_topic", "").strip(),
+        "review_type": st.session_state.get(f"{prefix}_expanded_type", "").strip(),
+        "review_objective": st.session_state.get(f"{prefix}_expanded_objective", "").strip(),
+        "target_literature_type": st.session_state.get(f"{prefix}_expanded_target_type", "").strip(),
+        "inclusion_criteria": st.session_state.get(f"{prefix}_expanded_include", "").strip(),
+        "exclusion_criteria": st.session_state.get(f"{prefix}_expanded_exclude", "").strip(),
+        "dimensions": _json_load_dimensions(st.session_state.get(f"{prefix}_expanded_dims", ""), fallback),
     }
 
 
@@ -164,6 +216,9 @@ def _set_prompt_text(prefix: str, prompt: str, components: dict[str, object] | N
 def _criteria_signature(prefix: str, dimensions: list[dict[str, str]]) -> str:
     payload = {
         "review_topic": st.session_state.get(f"{prefix}_review_topic", ""),
+        "review_type": st.session_state.get(f"{prefix}_review_type", ""),
+        "review_objective": st.session_state.get(f"{prefix}_review_objective", ""),
+        "target_literature_type": st.session_state.get(f"{prefix}_target_literature_type", ""),
         "key_points": st.session_state.get(f"{prefix}_key_points", ""),
         "inclusion": st.session_state.get(f"{prefix}_inclusion", ""),
         "exclusion": st.session_state.get(f"{prefix}_exclusion", ""),
@@ -181,10 +236,13 @@ def _criteria_saved(prefix: str, dimensions: list[dict[str, str]]) -> bool:
 def _criteria_has_content(prefix: str, dimensions: list[dict[str, str]]) -> bool:
     text_values = [
         st.session_state.get(f"{prefix}_review_topic", ""),
+        st.session_state.get(f"{prefix}_review_type", ""),
+        st.session_state.get(f"{prefix}_review_objective", ""),
+        st.session_state.get(f"{prefix}_target_literature_type", ""),
         st.session_state.get(f"{prefix}_inclusion", ""),
         st.session_state.get(f"{prefix}_exclusion", ""),
     ]
-    dim_values = [f"{dim.get('name', '')} {dim.get('description', '')}" for dim in dimensions]
+    dim_values = [" ".join(str(dim.get(field, "")) for field in DIMENSION_FIELDS) for dim in dimensions]
     return any(str(value).strip() for value in [*text_values, *dim_values])
 
 
@@ -200,7 +258,10 @@ def _save_snapshot(prefix: str, project_id: int, user_id: int, dimensions: list[
         project_id,
         user_id,
         st.session_state[f"{prefix}_review_topic"],
-        st.session_state[f"{prefix}_key_points"],
+        st.session_state[f"{prefix}_review_type"],
+        st.session_state[f"{prefix}_review_objective"],
+        st.session_state[f"{prefix}_target_literature_type"],
+        st.session_state.get(f"{prefix}_key_points", ""),
         st.session_state[f"{prefix}_inclusion"],
         st.session_state[f"{prefix}_exclusion"],
         _normalize_dimensions(dimensions),
@@ -216,29 +277,40 @@ def _assemble_from_state(prefix: str, dimensions: list[dict[str, str]]) -> str:
     if workflow_mode == "use_ai":
         expanded = _current_ai_expanded(prefix)
         if expanded:
-            expanded_dimensions = parse_dimension_rules(expanded.get("DIMENSION_RULES", ""), dimensions)
             prompt = assemble_prompt(
-                expanded.get("REVIEW_TOPIC", ""),
-                expanded.get("INCLUSION_CRITERIA", ""),
-                expanded.get("EXCLUSION_CRITERIA", ""),
-                expanded_dimensions,
+                expanded.get("review_topic", ""),
+                expanded.get("review_type", ""),
+                expanded.get("review_objective", ""),
+                expanded.get("target_literature_type", ""),
+                expanded.get("inclusion_criteria", ""),
+                expanded.get("exclusion_criteria", ""),
+                expanded.get("dimensions", dimensions),
             )
             components = assemble_prompt_components(
-                expanded.get("REVIEW_TOPIC", ""),
-                expanded.get("INCLUSION_CRITERIA", ""),
-                expanded.get("EXCLUSION_CRITERIA", ""),
-                expanded_dimensions,
+                expanded.get("review_topic", ""),
+                expanded.get("review_type", ""),
+                expanded.get("review_objective", ""),
+                expanded.get("target_literature_type", ""),
+                expanded.get("inclusion_criteria", ""),
+                expanded.get("exclusion_criteria", ""),
+                expanded.get("dimensions", dimensions),
             )
             return _set_prompt_text(prefix, prompt, components)
 
     prompt = assemble_prompt(
         st.session_state[f"{prefix}_review_topic"],
+        st.session_state[f"{prefix}_review_type"],
+        st.session_state[f"{prefix}_review_objective"],
+        st.session_state[f"{prefix}_target_literature_type"],
         st.session_state[f"{prefix}_inclusion"],
         st.session_state[f"{prefix}_exclusion"],
         dimensions,
     )
     components = assemble_prompt_components(
         st.session_state[f"{prefix}_review_topic"],
+        st.session_state[f"{prefix}_review_type"],
+        st.session_state[f"{prefix}_review_objective"],
+        st.session_state[f"{prefix}_target_literature_type"],
         st.session_state[f"{prefix}_inclusion"],
         st.session_state[f"{prefix}_exclusion"],
         dimensions,
@@ -249,6 +321,9 @@ def _assemble_from_state(prefix: str, dimensions: list[dict[str, str]]) -> str:
 def _load_snapshot_into_state(prefix: str, snapshot: dict[str, Any]) -> None:
     dimensions = _normalize_dimensions(snapshot.get("dimensions") or _default_dimensions())
     st.session_state[f"{prefix}_review_topic"] = snapshot.get("review_topic", "")
+    st.session_state[f"{prefix}_review_type"] = snapshot.get("review_type", "")
+    st.session_state[f"{prefix}_review_objective"] = snapshot.get("review_objective", "")
+    st.session_state[f"{prefix}_target_literature_type"] = snapshot.get("target_literature_type", "")
     st.session_state[f"{prefix}_key_points"] = snapshot.get("key_points", "")
     st.session_state[f"{prefix}_inclusion"] = snapshot.get("inclusion_draft", "")
     st.session_state[f"{prefix}_exclusion"] = snapshot.get("exclusion_draft", "")
@@ -295,47 +370,83 @@ def _toggle_open(prefix: str, group: str, item_id: int) -> None:
     st.session_state[key] = open_ids
 
 
+def _criteria_preview_text(item: dict[str, Any]) -> str:
+    parts = [
+        f"{t('review_topic')}\n{item.get('review_topic', '')}",
+        f"{t('review_type')}\n{item.get('review_type', '')}",
+        f"{t('review_objective')}\n{item.get('review_objective', '')}",
+        f"{t('target_literature_type')}\n{item.get('target_literature_type', '')}",
+        f"{t('inclusion_criteria')}\n{item.get('inclusion_draft', '')}",
+        f"{t('exclusion_criteria')}\n{item.get('exclusion_draft', '')}",
+        f"{t('dimensions')}\n{json.dumps(_normalize_dimensions(item.get('dimensions') or []), ensure_ascii=False, indent=2)}",
+    ]
+    return "\n\n".join(parts)
+
+
 def _render_bilingual_review(prefix: str, bilingual: dict[str, Any]) -> None:
     left, right = st.columns(2)
     with left:
-        ui.readonly_panel(t("english_version"), str(bilingual.get("english", "") or ""), height=340)
+        ui.ai_result_panel(t("english_version"), str(bilingual.get("english", "") or ""), height=360)
     with right:
-        ui.readonly_panel(t("chinese_version"), str(bilingual.get("chinese", "") or ""), height=340)
+        ui.ai_result_panel(t("chinese_version"), str(bilingual.get("chinese", "") or ""), height=360)
 
 
 def _render_dimensions(prefix: str) -> list[dict[str, str]]:
     ui.section_title(t("dimensions"))
     dimensions = _normalize_dimensions(st.session_state[f"{prefix}_dimensions"])
-    header = st.columns([0.7, 2.4, 3.8, 1.15, 1.15])
-    header[1].caption(t("dimension_name"))
-    header[2].caption(t("dimension_description"))
     for idx, dim in enumerate(dimensions):
-        cols = st.columns([0.7, 2.4, 3.8, 1.15, 1.15], vertical_alignment="center")
-        cols[0].markdown(f"**D{idx + 1}**")
-        cols[1].text_input(
-            t("dimension_name"),
-            key=f"{prefix}_dim_name_{idx}",
-            label_visibility="collapsed",
-            placeholder=t("dimension_name"),
-        )
-        cols[2].text_input(
-            t("dimension_description"),
-            key=f"{prefix}_dim_desc_{idx}",
-            label_visibility="collapsed",
-            placeholder=t("dimension_description"),
-        )
-        if cols[3].button(t("add"), key=f"{prefix}_add_dim_{idx}", help=t("add_dimension"), use_container_width=True):
-            st.session_state[f"{prefix}_pending_dimension_action"] = ("add", idx)
-            st.rerun()
-        if cols[4].button(
-            t("remove"),
-            key=f"{prefix}_remove_dim_{idx}",
-            help=t("remove_dimension"),
-            use_container_width=True,
-            disabled=len(dimensions) == 1,
-        ):
-            st.session_state[f"{prefix}_pending_dimension_action"] = ("remove", idx)
-            st.rerun()
+        title = dim.get("field_name") or t("unnamed_dimension")
+        with st.expander(f"D{idx + 1} - {title}", expanded=True):
+            top_cols = st.columns([1, 1, 1], vertical_alignment="bottom")
+            top_cols[0].text_input(
+                _dimension_field_label("field_name"),
+                key=f"{prefix}_dim_field_name_{idx}",
+                placeholder=_dimension_field_label("field_name"),
+            )
+            if top_cols[1].button(t("add"), key=f"{prefix}_add_dim_{idx}", help=t("add_dimension"), use_container_width=True):
+                st.session_state[f"{prefix}_pending_dimension_action"] = ("add", idx)
+                st.rerun()
+            if top_cols[2].button(
+                t("remove"),
+                key=f"{prefix}_remove_dim_{idx}",
+                help=t("remove_dimension"),
+                use_container_width=True,
+                disabled=len(dimensions) == 1,
+            ):
+                st.session_state[f"{prefix}_pending_dimension_action"] = ("remove", idx)
+                st.rerun()
+
+            st.text_area(
+                _dimension_field_label("definition"),
+                key=f"{prefix}_dim_definition_{idx}",
+                height=86,
+            )
+            signal_cols = st.columns(2)
+            signal_cols[0].text_area(
+                _dimension_field_label("direct_positive_signals"),
+                key=f"{prefix}_dim_direct_positive_signals_{idx}",
+                height=96,
+            )
+            signal_cols[1].text_area(
+                _dimension_field_label("indirect_or_proxy_signals"),
+                key=f"{prefix}_dim_indirect_or_proxy_signals_{idx}",
+                height=96,
+            )
+            rule_cols = st.columns(3)
+            rule_cols[0].text_area(_dimension_field_label("yes_rule"), key=f"{prefix}_dim_yes_rule_{idx}", height=106)
+            rule_cols[1].text_area(_dimension_field_label("unclear_rule"), key=f"{prefix}_dim_unclear_rule_{idx}", height=106)
+            rule_cols[2].text_area(_dimension_field_label("no_rule"), key=f"{prefix}_dim_no_rule_{idx}", height=106)
+            case_cols = st.columns(2)
+            case_cols[0].text_area(
+                _dimension_field_label("do_not_exclude_cases"),
+                key=f"{prefix}_dim_do_not_exclude_cases_{idx}",
+                height=96,
+            )
+            case_cols[1].text_area(
+                _dimension_field_label("fatal_mismatch_cases"),
+                key=f"{prefix}_dim_fatal_mismatch_cases_{idx}",
+                height=96,
+            )
 
     dimensions = _collect_dimensions_from_widgets(prefix)
     st.session_state[f"{prefix}_dimensions"] = dimensions
@@ -360,7 +471,6 @@ def _render_save_criteria_dialog(prefix: str, project_id: int, user_id: int, dim
             return
         _save_snapshot(prefix, project_id, user_id, dimensions, cleaned_name)
         st.session_state[f"{prefix}_show_save_criteria_dialog"] = False
-        st.session_state[f"{prefix}_save_criteria_name_dialog"] = ""
         st.success(t("criteria_saved"))
         st.rerun()
 
@@ -383,7 +493,7 @@ def _render_criteria_library(prefix: str, project_id: int, user_id: int) -> None
         ui.empty_state(t("no_criteria_saved"))
         return
 
-    with st.container(height=260, border=True):
+    with st.container(height=420, border=True):
         open_ids = set(st.session_state.get(f"{prefix}_criteria_library_open_ids", set()))
         for item in snapshots:
             item_id = int(item["id"])
@@ -401,12 +511,7 @@ def _render_criteria_library(prefix: str, project_id: int, user_id: int) -> None
                 st.session_state[f"{prefix}_pending_delete_criteria_id"] = item_id
                 st.rerun()
             if item_id in open_ids:
-                st.caption(t("review_topic"))
-                st.write(item.get("review_topic", ""))
-                st.caption(t("inclusion_criteria"))
-                st.write(item.get("inclusion_draft", ""))
-                st.caption(t("exclusion_criteria"))
-                st.write(item.get("exclusion_draft", ""))
+                ui.ai_result_panel(t("criteria_library"), _criteria_preview_text(item), height=260)
             st.divider()
 
 
@@ -428,7 +533,7 @@ def _render_prompt_library(prefix: str, project_id: int, user_id: int) -> None:
         ui.empty_state(t("no_prompt_saved"))
         return
 
-    with st.container(height=260, border=True):
+    with st.container(height=420, border=True):
         open_ids = set(st.session_state.get(f"{prefix}_prompt_library_open_ids", set()))
         for item in versions:
             item_id = int(item["id"])
@@ -446,7 +551,7 @@ def _render_prompt_library(prefix: str, project_id: int, user_id: int) -> None:
                 st.session_state[f"{prefix}_pending_delete_prompt_id"] = item_id
                 st.rerun()
             if item_id in open_ids:
-                ui.readonly_panel(t("prompt_text"), item.get("prompt_text", ""), height=220)
+                ui.ai_result_panel(t("prompt_text"), item.get("prompt_text", ""), height=260)
             st.divider()
 
 
@@ -524,7 +629,10 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
         return
 
     st.text_area(t("review_topic"), key=f"{prefix}_review_topic", height=88)
-    st.text_area(t("key_points"), key=f"{prefix}_key_points", height=88)
+    meta_cols = st.columns(2)
+    meta_cols[0].text_input(t("review_type"), key=f"{prefix}_review_type", placeholder=REVIEW_TYPE_PLACEHOLDER)
+    meta_cols[1].text_input(t("target_literature_type"), key=f"{prefix}_target_literature_type", placeholder=TARGET_LITERATURE_TYPE_PLACEHOLDER)
+    st.text_area(t("review_objective"), key=f"{prefix}_review_objective", height=96)
     st.text_area(t("inclusion_criteria"), key=f"{prefix}_inclusion", height=120)
     st.text_area(t("exclusion_criteria"), key=f"{prefix}_exclusion", height=120)
 
@@ -544,7 +652,9 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
                 expanded = expand_criteria_with_ai(
                     user_id,
                     st.session_state[f"{prefix}_review_topic"],
-                    st.session_state[f"{prefix}_key_points"],
+                    st.session_state[f"{prefix}_review_type"],
+                    st.session_state[f"{prefix}_review_objective"],
+                    st.session_state[f"{prefix}_target_literature_type"],
                     st.session_state[f"{prefix}_inclusion"],
                     st.session_state[f"{prefix}_exclusion"],
                     dimensions,
@@ -558,9 +668,13 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
 
         if _current_ai_expanded(prefix):
             st.text_area(t("expanded_review_topic"), key=f"{prefix}_expanded_topic", height=88)
+            expanded_meta_cols = st.columns(2)
+            expanded_meta_cols[0].text_input(t("expanded_review_type"), key=f"{prefix}_expanded_type")
+            expanded_meta_cols[1].text_input(t("expanded_target_literature_type"), key=f"{prefix}_expanded_target_type")
+            st.text_area(t("expanded_review_objective"), key=f"{prefix}_expanded_objective", height=96)
             st.text_area(t("expanded_inclusion_criteria"), key=f"{prefix}_expanded_include", height=120)
             st.text_area(t("expanded_exclusion_criteria"), key=f"{prefix}_expanded_exclude", height=120)
-            st.text_area(t("expanded_dimension_rules"), key=f"{prefix}_expanded_dims", height=150)
+            st.text_area(t("expanded_dimension_rules"), key=f"{prefix}_expanded_dims", height=220, help=t("expanded_dimension_rules_help"))
 
     button_cols = st.columns(2)
     if button_cols[0].button(t("save_standard"), key=f"{prefix}_open_save_criteria", use_container_width=True):

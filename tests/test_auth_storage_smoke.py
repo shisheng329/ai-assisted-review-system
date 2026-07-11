@@ -31,6 +31,7 @@ def test_auth_project_and_data_file_smoke(monkeypatch) -> None:
         auth = importlib.import_module("app.services.auth")
         projects = importlib.import_module("app.services.projects")
         storage = importlib.import_module("app.services.storage")
+        screening = importlib.import_module("app.services.screening")
 
         db.init_db()
         user_id = auth.register_user("tester", "tester@example.com", "pass123456")
@@ -58,5 +59,27 @@ def test_auth_project_and_data_file_smoke(monkeypatch) -> None:
         assert file_record is not None
         assert loaded_df is not None
         assert list(loaded_df["Record-id"]) == ["R1", "R2", "R3"]
+
+        snapshot_id = screening.save_criteria_snapshot(
+            project_id,
+            user_id,
+            "AI fairness in health",
+            "scoping review",
+            "Map fairness-aware AI applications.",
+            "primary empirical studies",
+            "",
+            "Include health AI fairness studies.",
+            "Exclude non-health studies.",
+            [{"name": "Legacy domain", "description": "Legacy description"}],
+            None,
+            name="Structured standard",
+        )
+        snapshot = screening.get_criteria_snapshot(project_id, user_id, snapshot_id)
+        assert snapshot is not None
+        assert snapshot["review_type"] == "scoping review"
+        assert snapshot["review_objective"] == "Map fairness-aware AI applications."
+        assert snapshot["target_literature_type"] == "primary empirical studies"
+        assert snapshot["dimensions"][0]["field_name"] == "Legacy domain"
+        assert snapshot["dimensions"][0]["definition"] == "Legacy description"
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)

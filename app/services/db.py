@@ -250,6 +250,9 @@ def init_db() -> None:
             """
         )
         _ensure_column(conn, "criteria_snapshots", "name", "TEXT")
+        _ensure_column(conn, "criteria_snapshots", "review_type", "TEXT DEFAULT \"\"")
+        _ensure_column(conn, "criteria_snapshots", "review_objective", "TEXT DEFAULT \"\"")
+        _ensure_column(conn, "criteria_snapshots", "target_literature_type", "TEXT DEFAULT \"\"")
         _ensure_column(conn, "prompt_versions", "name", "TEXT")
         _ensure_column(conn, "topic_runs", "error_type", "TEXT")
         _ensure_column(conn, "topic_runs", "error_message", "TEXT")
