@@ -225,11 +225,41 @@ def assemble_prompt_components(
     return build_prompt_components(review_topic, review_type, review_objective, target_literature_type, inclusion_criteria, exclusion_criteria, dimensions or [])
 
 
-def save_prompt_version(project_id: int, user_id: int, prompt_text: str, bilingual_json: dict[str, str] | None = None, name: str = "") -> int:
-    return db.execute(
-        "INSERT INTO prompt_versions (project_id, user_id, name, prompt_text, bilingual_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, user_id, name.strip(), prompt_text, json_dumps(bilingual_json) if bilingual_json else None, utc_now_iso()),
-    )
+def save_prompt_version(
+    project_id: int,
+    user_id: int,
+    prompt_text: str,
+    bilingual_json: dict[str, Any] | None = None,
+    name: str = "",
+    criteria_snapshot_id: int | None = None,
+    make_active: bool = True,
+) -> int:
+    with db.connect() as conn:
+        if make_active:
+            conn.execute(
+                "UPDATE prompt_versions SET is_active = 0 WHERE project_id = ? AND user_id = ?",
+                (project_id, user_id),
+            )
+        cursor = conn.execute(
+            """
+            INSERT INTO prompt_versions (
+                project_id, user_id, name, prompt_text, bilingual_json,
+                criteria_snapshot_id, is_active, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                user_id,
+                name.strip(),
+                prompt_text,
+                json_dumps(bilingual_json) if bilingual_json else None,
+                criteria_snapshot_id,
+                1 if make_active else 0,
+                utc_now_iso(),
+            ),
+        )
+        return int(cursor.lastrowid)
 
 
 def _format_prompt_version(row: Any) -> dict[str, Any]:
@@ -255,11 +285,63 @@ def get_prompt_version(project_id: int, user_id: int, prompt_id: int) -> dict[st
     return _format_prompt_version(row) if row else None
 
 
-def delete_prompt_version(project_id: int, user_id: int, prompt_id: int) -> None:
-    db.execute(
-        "DELETE FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
-        (prompt_id, project_id, user_id),
+def get_active_prompt_version(project_id: int, user_id: int) -> dict[str, Any] | None:
+    row = db.fetch_one(
+        """
+        SELECT * FROM prompt_versions
+        WHERE project_id = ? AND user_id = ? AND is_active = 1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (project_id, user_id),
     )
+    return _format_prompt_version(row) if row else None
+
+
+def set_active_prompt_version(project_id: int, user_id: int, prompt_id: int) -> bool:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
+            (prompt_id, project_id, user_id),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE prompt_versions SET is_active = 0 WHERE project_id = ? AND user_id = ?",
+            (project_id, user_id),
+        )
+        conn.execute(
+            "UPDATE prompt_versions SET is_active = 1 WHERE id = ? AND project_id = ? AND user_id = ?",
+            (prompt_id, project_id, user_id),
+        )
+    return True
+
+
+def delete_prompt_version(project_id: int, user_id: int, prompt_id: int) -> None:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT is_active FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
+            (prompt_id, project_id, user_id),
+        ).fetchone()
+        if not row:
+            return
+        was_active = bool(row["is_active"])
+        conn.execute(
+            "DELETE FROM prompt_versions WHERE id = ? AND project_id = ? AND user_id = ?",
+            (prompt_id, project_id, user_id),
+        )
+        if was_active:
+            replacement = conn.execute(
+                """
+                SELECT id FROM prompt_versions
+                WHERE project_id = ? AND user_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id, user_id),
+            ).fetchone()
+            if replacement:
+                conn.execute("UPDATE prompt_versions SET is_active = 1 WHERE id = ?", (replacement["id"],))
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:

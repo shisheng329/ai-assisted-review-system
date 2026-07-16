@@ -8,9 +8,10 @@ import subprocess
 import sys
 import traceback
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -30,6 +31,7 @@ from .utils import app_root, ensure_dir, json_dumps, json_loads, to_json_compati
 
 logger = logging.getLogger(__name__)
 BERTOPIC_WORKER_TIMEOUT_SECONDS = 600
+BERTopicProgressCallback = Callable[[str], None]
 
 
 class BERTopicDependencyError(RuntimeError):
@@ -301,6 +303,7 @@ def _write_worker_payload(
     payload_dir = _worker_payload_dir(user_id, project_id)
     input_path = payload_dir / f"bertopic_{run_id}_input.csv"
     result_path = payload_dir / f"bertopic_{run_id}_result.json"
+    progress_path = payload_dir / f"bertopic_{run_id}_progress.json"
     payload_path = payload_dir / f"bertopic_{run_id}_payload.json"
     work.drop(columns=["text"], errors="ignore").to_csv(input_path, index=False, encoding="utf-8-sig")
     payload = {
@@ -313,9 +316,93 @@ def _write_worker_payload(
         "params": config,
         "input_path": str(input_path),
         "result_path": str(result_path),
+        "progress_path": str(progress_path),
     }
     payload_path.write_text(json_dumps(payload), encoding="utf-8")
     return payload_path
+
+
+def _worker_progress_path(payload_path: Path) -> Path | None:
+    payload = json_loads(payload_path.read_text(encoding="utf-8"), {}) if payload_path.exists() else {}
+    value = payload.get("progress_path")
+    return Path(value) if value else None
+
+
+def _read_worker_progress(payload_path: Path) -> str:
+    progress_path = _worker_progress_path(payload_path)
+    if progress_path is None or not progress_path.exists():
+        return ""
+    progress = json_loads(progress_path.read_text(encoding="utf-8"), {})
+    return str(progress.get("stage") or "")
+
+
+def _write_worker_progress(payload: dict[str, Any], stage: str) -> None:
+    value = payload.get("progress_path")
+    if not value:
+        return
+    try:
+        progress_path = Path(value)
+        ensure_dir(progress_path.parent)
+        temporary_path = progress_path.with_suffix(".tmp")
+        temporary_path.write_text(json_dumps({"stage": stage, "updated_at": utc_now_iso()}), encoding="utf-8")
+        temporary_path.replace(progress_path)
+    except Exception:
+        logger.exception("BERTopic progress file update failed for stage=%s", stage)
+
+
+def _notify_progress(callback: BERTopicProgressCallback | None, stage: str) -> None:
+    if callback is None or not stage:
+        return
+    try:
+        callback(stage)
+    except Exception:
+        logger.exception("BERTopic progress callback failed for stage=%s", stage)
+
+
+def _runtime_metadata() -> dict[str, Any]:
+    packages = {
+        "streamlit": "streamlit",
+        "plotly": "plotly",
+        "bertopic": "bertopic",
+        "scikit_learn": "scikit-learn",
+        "umap": "umap-learn",
+        "hdbscan": "hdbscan",
+        "numba": "numba",
+        "sentence_transformers": "sentence-transformers",
+        "transformers": "transformers",
+        "torch": "torch",
+    }
+    versions: dict[str, str] = {}
+    for key, package in packages.items():
+        try:
+            versions[key] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[key] = "not-installed"
+    commit = (
+        os.environ.get("STREAMLIT_GIT_COMMIT")
+        or os.environ.get("GIT_COMMIT")
+        or os.environ.get("COMMIT_SHA")
+        or os.environ.get("RENDER_GIT_COMMIT")
+        or ""
+    )
+    if not commit:
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(app_root()),
+            )
+            if completed.returncode == 0:
+                commit = completed.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            commit = ""
+    return {
+        "python": sys.version.split()[0],
+        "packages": versions,
+        "commit": commit or "unknown",
+    }
 
 
 def _read_worker_result(payload_path: Path) -> dict[str, Any]:
@@ -328,7 +415,7 @@ def _read_worker_result(payload_path: Path) -> dict[str, Any]:
 
 def _cleanup_worker_files(payload_path: Path) -> None:
     payload = json_loads(payload_path.read_text(encoding="utf-8"), {}) if payload_path.exists() else {}
-    for key in ("input_path", "result_path"):
+    for key in ("input_path", "result_path", "progress_path"):
         value = payload.get(key)
         if value:
             unlink_managed_file(value)
@@ -356,6 +443,7 @@ def run_bertopic(
     data_file_id: int | None = None,
     screening_run_id: int | None = None,
     timeout_seconds: int = BERTOPIC_WORKER_TIMEOUT_SECONDS,
+    progress_callback: BERTopicProgressCallback | None = None,
 ) -> dict[str, Any]:
     work = _prepare_docs(df)
     config = _normalize_params(params, len(work))
@@ -371,36 +459,58 @@ def run_bertopic(
     env["NUMBA_CACHE_DIR"] = str(_ensure_numba_cache_dir())
     env.setdefault("HF_HUB_OFFLINE", "1")
     env.setdefault("TRANSFORMERS_OFFLINE", "1")
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-m", "app.services.bertopic_worker", str(payload_path)],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=str(app_root()),
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        detail = _base_error_detail(
-            json_loads(payload_path.read_text(encoding="utf-8"), {}),
-            work,
-            {
-                "timeout_seconds": int(timeout_seconds),
-                "stdout": exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout,
-                "stderr": exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
-            },
-        )
-        _update_topic_run_failure(run_id, "timeout", f"BERTopic worker timed out after {timeout_seconds}s.", detail)
-        logger.exception("BERTopic worker timed out for run_id=%s", run_id)
-        raise BERTopicTimeoutError(f"BERTopic worker timed out after {timeout_seconds}s.") from exc
+    process = subprocess.Popen(
+        [sys.executable, "-m", "app.services.bertopic_worker", str(payload_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(app_root()),
+        env=env,
+    )
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
+    last_stage = ""
+    stdout = ""
+    stderr = ""
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+            break
+        except subprocess.TimeoutExpired:
+            stage = _read_worker_progress(payload_path)
+            if stage and stage != last_stage:
+                last_stage = stage
+                _notify_progress(progress_callback, stage)
+            if time.monotonic() < deadline:
+                continue
+            process.kill()
+            stdout, stderr = process.communicate()
+            payload = json_loads(payload_path.read_text(encoding="utf-8"), {})
+            detail = _base_error_detail(
+                payload,
+                work,
+                {
+                    "timeout_seconds": int(timeout_seconds),
+                    "last_stage": last_stage,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "runtime": _runtime_metadata(),
+                },
+            )
+            _update_topic_run_failure(run_id, "timeout", f"BERTopic worker timed out after {timeout_seconds}s.", detail)
+            logger.error("BERTopic worker timed out for run_id=%s last_stage=%s", run_id, last_stage)
+            raise BERTopicTimeoutError(f"BERTopic worker timed out after {timeout_seconds}s.")
+
+    final_stage = _read_worker_progress(payload_path)
+    if final_stage and final_stage != last_stage:
+        _notify_progress(progress_callback, final_stage)
 
     result = _read_worker_result(payload_path)
-    if completed.returncode != 0 and result.get("status") != "completed":
+    if process.returncode != 0 and result.get("status") != "completed":
         detail = dict(result.get("detail") or {})
-        detail.setdefault("stdout", completed.stdout)
-        detail.setdefault("stderr", completed.stderr)
+        detail.setdefault("stdout", stdout)
+        detail.setdefault("stderr", stderr)
         result["detail"] = detail
-        logger.error("BERTopic worker failed for run_id=%s stdout=%s stderr=%s result=%s", run_id, completed.stdout, completed.stderr, result)
+        logger.error("BERTopic worker failed for run_id=%s stdout=%s stderr=%s result=%s", run_id, stdout, stderr, result)
         _update_topic_run_failure(run_id, str(result.get("error_type") or "runtime"), str(result.get("message") or "BERTopic worker failed."), detail)
         _raise_worker_error(result)
     if result.get("status") != "completed":
@@ -410,27 +520,37 @@ def run_bertopic(
     output_path = result.get("output_path")
     output_df = read_export_dataframe(output_path)
     topic_info = pd.DataFrame(result.get("topic_info", []))
-    return {"run_id": run_id, "output_df": output_df, "topic_info": topic_info, "artifacts": result.get("artifacts", {})}
-
+    return {
+        "run_id": run_id,
+        "output_df": output_df,
+        "topic_info": topic_info,
+        "artifacts": result.get("artifacts", {}),
+        "detail": dict(result.get("detail") or {}),
+    }
 
 def _run_bertopic_in_worker(payload: dict[str, Any]) -> dict[str, Any]:
-    from bertopic import BERTopic
-    from sklearn.feature_extraction.text import CountVectorizer
-    from umap import UMAP
-
     run_id = int(payload["run_id"])
     project_id = int(payload["project_id"])
     user_id = int(payload["user_id"])
     data_file_id = payload.get("data_file_id")
     config = dict(payload.get("params") or {})
     input_path = Path(payload["input_path"])
+
+    _write_worker_progress(payload, "preparing_data")
     work = _prepare_docs(pd.read_csv(input_path))
     docs = work["text"].tolist()
-    detail = _base_error_detail(payload, work)
+    detail = _base_error_detail(payload, work, {"runtime": _runtime_metadata()})
 
     try:
+        _write_worker_progress(payload, "resolving_embeddings")
         embedding_model, embeddings, embedding_detail = _resolve_embeddings(docs, int(config["random_state"]))
         detail.update(embedding_detail)
+
+        _write_worker_progress(payload, "loading_dependencies")
+        from bertopic import BERTopic
+        from sklearn.feature_extraction.text import CountVectorizer
+        from umap import UMAP
+
         umap_model = UMAP(
             n_neighbors=int(config["n_neighbors"]),
             n_components=int(config["n_components"]),
@@ -447,6 +567,8 @@ def _run_bertopic_in_worker(payload: dict[str, Any]) -> dict[str, Any]:
             min_topic_size=int(config["min_topic_size"]),
             nr_topics=int(config["nr_topics"]),
         )
+
+        _write_worker_progress(payload, "running_clustering")
         if embeddings is None:
             topics, _probs = topic_model.fit_transform(docs)
         else:
@@ -455,43 +577,82 @@ def _run_bertopic_in_worker(payload: dict[str, Any]) -> dict[str, Any]:
         work["Topic"] = topics
         topic_names = topic_info.set_index("Topic")["Name"].to_dict()
         work["Topic_Name"] = work["Topic"].map(topic_names)
+        effective_topics = pd.to_numeric(topic_info.get("Topic"), errors="coerce")
+        effective_topic_count = int(effective_topics[effective_topics != -1].dropna().nunique())
+        detail["effective_topic_count"] = effective_topic_count
 
         export_dir = project_exports_root(user_id, project_id)
-        source_row = db.fetch_one("SELECT filename FROM data_files WHERE id = ? AND project_id = ? AND user_id = ?", (data_file_id, project_id, user_id)) if data_file_id else None
+        source_row = db.fetch_one(
+            "SELECT filename FROM data_files WHERE id = ? AND project_id = ? AND user_id = ?",
+            (data_file_id, project_id, user_id),
+        ) if data_file_id else None
         source_filename = source_row["filename"] if source_row else f"topics_{run_id}.csv"
-        output_path = source_export_path(user_id, project_id, source_filename, "聚类")
+        output_path = source_export_path(user_id, project_id, source_filename, "??")
         save_export_dataframe(work.drop(columns=["text"], errors="ignore"), output_path)
 
-        artifacts = {}
+        _write_worker_progress(payload, "generating_charts")
+        artifacts: dict[str, str] = {}
+        chart_diagnostics: dict[str, dict[str, Any]] = {}
         chart_builders = {
             "barchart": lambda: topic_model.visualize_barchart(top_n_topics=int(config["nr_topics"])),
             "topics": topic_model.visualize_topics,
             "hierarchy": topic_model.visualize_hierarchy,
         }
         for chart_key, build_chart in chart_builders.items():
+            diagnostic: dict[str, Any] = {
+                "generated": False,
+                "effective_topic_count": effective_topic_count,
+            }
             try:
                 chart = build_chart()
-                artifacts[chart_key] = save_json_artifact(
+                artifact_path = save_json_artifact(
                     to_json_compatible(chart.to_plotly_json()),
                     export_dir / f"{chart_key}_{run_id}.json",
                 )
-            except Exception:
+                artifacts[chart_key] = artifact_path
+                diagnostic["generated"] = True
+                diagnostic["artifact_path"] = artifact_path
+            except Exception as exc:
+                diagnostic.update(
+                    {
+                        "error_type": type(exc).__name__,
+                        "error_message": _short_error_message(str(exc)),
+                    }
+                )
                 logger.exception("BERTopic chart generation failed for run_id=%s chart=%s", run_id, chart_key)
+            chart_diagnostics[chart_key] = diagnostic
+        detail["chart_diagnostics"] = chart_diagnostics
+
+        _write_worker_progress(payload, "saving_results")
         topic_info_records = _topic_info_records(topic_info)
         db.execute(
             """
             UPDATE topic_runs
-            SET status = 'completed', topic_info_json = ?, artifacts_json = ?, output_path = ?, error_type = NULL, error_message = NULL, error_detail_json = NULL, updated_at = ?
+            SET status = 'completed', topic_info_json = ?, artifacts_json = ?, output_path = ?,
+                error_type = NULL, error_message = NULL, error_detail_json = ?, updated_at = ?
             WHERE id = ?
             """,
-            (json_dumps(topic_info_records), json_dumps(artifacts), str(output_path), utc_now_iso(), run_id),
+            (
+                json_dumps(topic_info_records),
+                json_dumps(artifacts),
+                str(output_path),
+                json_dumps(detail),
+                utc_now_iso(),
+                run_id,
+            ),
         )
-        return {"status": "completed", "run_id": run_id, "output_path": str(output_path), "topic_info": topic_info_records, "artifacts": artifacts, "detail": detail}
+        return {
+            "status": "completed",
+            "run_id": run_id,
+            "output_path": str(output_path),
+            "topic_info": topic_info_records,
+            "artifacts": artifacts,
+            "detail": detail,
+        }
     except Exception as exc:
         detail.update({"traceback": traceback.format_exc(), "exception_type": type(exc).__name__})
         _update_topic_run_failure(run_id, _classify_error_type(str(exc), "runtime"), str(exc), detail)
         raise
-
 
 def worker_main(payload_path_value: str) -> int:
     payload_path = Path(payload_path_value)
@@ -502,19 +663,49 @@ def worker_main(payload_path_value: str) -> int:
         result_path.write_text(json_dumps(result), encoding="utf-8")
         return 0
     except BERTopicInputError as exc:
-        detail = _base_error_detail(payload, extra={"traceback": traceback.format_exc(), "exception_type": type(exc).__name__})
+        detail = _base_error_detail(
+            payload,
+            extra={
+                "traceback": traceback.format_exc(),
+                "exception_type": type(exc).__name__,
+                "last_stage": _read_worker_progress(payload_path),
+                "runtime": _runtime_metadata(),
+            },
+        )
         result = {"status": "failed", "error_type": "input", "message": str(exc), "detail": detail}
     except (ImportError, ModuleNotFoundError) as exc:
-        detail = _base_error_detail(payload, extra={"traceback": traceback.format_exc(), "exception_type": type(exc).__name__})
+        detail = _base_error_detail(
+            payload,
+            extra={
+                "traceback": traceback.format_exc(),
+                "exception_type": type(exc).__name__,
+                "last_stage": _read_worker_progress(payload_path),
+                "runtime": _runtime_metadata(),
+            },
+        )
         result = {"status": "failed", "error_type": "dependency", "message": str(exc), "detail": detail}
     except Exception as exc:
         logger.exception("BERTopic worker failed")
-        detail = _base_error_detail(payload, extra={"traceback": traceback.format_exc(), "exception_type": type(exc).__name__})
+        detail = _base_error_detail(
+            payload,
+            extra={
+                "traceback": traceback.format_exc(),
+                "exception_type": type(exc).__name__,
+                "last_stage": _read_worker_progress(payload_path),
+                "runtime": _runtime_metadata(),
+            },
+        )
         result = {"status": "failed", "error_type": _classify_error_type(str(exc), "runtime"), "message": str(exc), "detail": detail}
     run_id = payload.get("run_id")
     if run_id:
         try:
-            _update_topic_run_failure(int(run_id), str(result["error_type"]), str(result["message"]), dict(result.get("detail") or {}))
+            existing = db.fetch_one("SELECT error_detail_json FROM topic_runs WHERE id = ?", (int(run_id),))
+            existing_detail = json_loads(existing["error_detail_json"], {}) if existing else {}
+            merged_detail = dict(result.get("detail") or {})
+            if isinstance(existing_detail, dict):
+                merged_detail.update(existing_detail)
+            result["detail"] = merged_detail
+            _update_topic_run_failure(int(run_id), str(result["error_type"]), str(result["message"]), merged_detail)
         except Exception:
             logger.exception("Failed to mark BERTopic run failed from worker_main")
     result_path.write_text(json_dumps(result), encoding="utf-8")

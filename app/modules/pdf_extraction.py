@@ -39,6 +39,7 @@ def _ensure_state(project_id: int) -> None:
     st.session_state.setdefault(f"{prefix}_template_upload_nonce", 0)
     st.session_state.setdefault(f"{prefix}_handled_pdf_upload_token", "")
     st.session_state.setdefault(f"{prefix}_pending_delete_pdf_ids", [])
+    st.session_state.setdefault(f"{prefix}_extraction_running", False)
 
 
 def _valid_suffix(filename: str, allowed: set[str]) -> bool:
@@ -252,7 +253,6 @@ def render(project: dict, user: dict) -> None:
     pdf_files = get_project_pdf_files(project_id, user_id)
     if pdf_files:
         selected_pdf_ids = _render_pdf_selection(prefix, pdf_files)
-        _render_pdf_delete_list(project_id, user_id, prefix, pdf_files)
     else:
         selected_pdf_ids = []
         ui.empty_state(t("no_pdf_files"), t("pdf_upload"))
@@ -260,20 +260,68 @@ def render(project: dict, user: dict) -> None:
     ui.section_title(t("start_extraction"))
     template_ready = selected_template is not None
     pdf_ready = bool(selected_pdf_ids)
+    extraction_running = bool(st.session_state.get(f"{prefix}_extraction_running"))
+    disabled_reasons = []
     if api_config is None:
-        st.info(t("api_required"))
-    elif not template_ready:
-        st.info(t("upload_template_first"))
-    elif not pdf_ready:
-        st.info(t("select_pdf_first"))
-    if st.button(t("start_extraction"), use_container_width=True, disabled=(api_config is None or not template_ready or not pdf_ready)):
+        disabled_reasons.append(t("api_required"))
+    if not template_ready:
+        disabled_reasons.append(t("upload_template_first"))
+    if not pdf_ready:
+        disabled_reasons.append(t("select_pdf_first"))
+    if extraction_running:
+        disabled_reasons.append(t("pdf_task_running"))
+    if disabled_reasons:
+        st.info(t("pdf_start_disabled_reasons").format(reasons="?".join(disabled_reasons)))
+
+    start_disabled = bool(disabled_reasons)
+    if st.button(t("start_extraction"), use_container_width=True, disabled=start_disabled):
+        st.session_state[f"{prefix}_extraction_running"] = True
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+        current_file_text = st.empty()
+        failure_box = st.empty()
+
+        def update_progress(done: int, total: int, filename: str, stage: str, error: str) -> None:
+            ratio = 0 if total <= 0 else min(1.0, done / total)
+            progress_bar.progress(ratio)
+            progress_text.caption(t("pdf_progress_count").format(done=done, total=total))
+            if filename:
+                current_file_text.caption(t("pdf_progress_file").format(filename=filename))
+            if stage == "failed" and error:
+                failure_box.warning(t("pdf_file_failed").format(filename=filename, reason=" ".join(error.split())[:180]))
+
         try:
-            with st.spinner(t("extraction_in_progress")):
-                result = run_pdf_extraction(project_id, user_id, int(selected_template["id"]), json_loads(selected_template["columns_json"], []), selected_pdf_ids)
-            st.success(f"{t('run_complete')} #{result['run_id']}")
-            st.rerun()
+            with st.status(t("extraction_in_progress"), expanded=True) as status:
+                result = run_pdf_extraction(
+                    project_id,
+                    user_id,
+                    int(selected_template["id"]),
+                    json_loads(selected_template["columns_json"], []),
+                    selected_pdf_ids,
+                    progress_callback=update_progress,
+                )
+                status.update(label=t("pdf_extraction_complete"), state="complete", expanded=False)
+            st.success(
+                t("pdf_summary").format(
+                    success=result["success_count"],
+                    failed=result["failed_count"],
+                )
+            )
+            for failure in result["failures"]:
+                st.warning(
+                    t("pdf_file_failed").format(
+                        filename=failure["file_name"],
+                        reason=" ".join(str(failure["error_message"]).split())[:180],
+                    )
+                )
         except Exception:
             logger.exception("PDF extraction failed for project_id=%s user_id=%s", project_id, user_id)
             st.error(t("pdf_extraction_failed"))
+        finally:
+            st.session_state[f"{prefix}_extraction_running"] = False
 
     _render_pdf_results(project_id, user_id)
+
+    if pdf_files:
+        st.divider()
+        _render_pdf_delete_list(project_id, user_id, prefix, pdf_files)

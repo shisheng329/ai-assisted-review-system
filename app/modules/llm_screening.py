@@ -18,6 +18,7 @@ from app.services.screening import (
     delete_prompt_version,
     delete_screening_run,
     expand_criteria_with_ai,
+    get_active_prompt_version,
     get_criteria_snapshot,
     get_existing_screening_runs_for_file,
     get_prompt_version,
@@ -28,6 +29,7 @@ from app.services.screening import (
     run_screening,
     save_criteria_snapshot,
     save_prompt_version,
+    set_active_prompt_version,
 )
 from app.services.storage import ManagedFileMissingError, get_active_data_file, load_project_dataframe, require_existing_path
 from app.services.prompting import DIMENSION_FIELDS, normalize_dimensions as normalize_prompt_dimensions
@@ -110,6 +112,10 @@ def _normalize_dimensions(dimensions: list[dict[str, str]]) -> list[dict[str, st
 
 def _dimension_field_label(field: str) -> str:
     return t(f"dimension_{field}")
+
+
+def _dimension_field_placeholder(field: str) -> str:
+    return t(f"dimension_{field}_placeholder")
 
 
 def _sync_dimension_widget_state(prefix: str, dimensions: list[dict[str, str]]) -> None:
@@ -401,7 +407,7 @@ def _render_dimensions(prefix: str) -> list[dict[str, str]]:
             top_cols[0].text_input(
                 _dimension_field_label("field_name"),
                 key=f"{prefix}_dim_field_name_{idx}",
-                placeholder=_dimension_field_label("field_name"),
+                placeholder=_dimension_field_placeholder("field_name"),
             )
             if top_cols[1].button(t("add"), key=f"{prefix}_add_dim_{idx}", help=t("add_dimension"), use_container_width=True):
                 st.session_state[f"{prefix}_pending_dimension_action"] = ("add", idx)
@@ -420,32 +426,52 @@ def _render_dimensions(prefix: str) -> list[dict[str, str]]:
                 _dimension_field_label("definition"),
                 key=f"{prefix}_dim_definition_{idx}",
                 height=86,
+                placeholder=_dimension_field_placeholder("definition"),
             )
             signal_cols = st.columns(2)
             signal_cols[0].text_area(
                 _dimension_field_label("direct_positive_signals"),
                 key=f"{prefix}_dim_direct_positive_signals_{idx}",
                 height=96,
+                placeholder=_dimension_field_placeholder("direct_positive_signals"),
             )
             signal_cols[1].text_area(
                 _dimension_field_label("indirect_or_proxy_signals"),
                 key=f"{prefix}_dim_indirect_or_proxy_signals_{idx}",
                 height=96,
+                placeholder=_dimension_field_placeholder("indirect_or_proxy_signals"),
             )
             rule_cols = st.columns(3)
-            rule_cols[0].text_area(_dimension_field_label("yes_rule"), key=f"{prefix}_dim_yes_rule_{idx}", height=106)
-            rule_cols[1].text_area(_dimension_field_label("unclear_rule"), key=f"{prefix}_dim_unclear_rule_{idx}", height=106)
-            rule_cols[2].text_area(_dimension_field_label("no_rule"), key=f"{prefix}_dim_no_rule_{idx}", height=106)
+            rule_cols[0].text_area(
+                _dimension_field_label("yes_rule"),
+                key=f"{prefix}_dim_yes_rule_{idx}",
+                height=106,
+                placeholder=_dimension_field_placeholder("yes_rule"),
+            )
+            rule_cols[1].text_area(
+                _dimension_field_label("unclear_rule"),
+                key=f"{prefix}_dim_unclear_rule_{idx}",
+                height=106,
+                placeholder=_dimension_field_placeholder("unclear_rule"),
+            )
+            rule_cols[2].text_area(
+                _dimension_field_label("no_rule"),
+                key=f"{prefix}_dim_no_rule_{idx}",
+                height=106,
+                placeholder=_dimension_field_placeholder("no_rule"),
+            )
             case_cols = st.columns(2)
             case_cols[0].text_area(
                 _dimension_field_label("do_not_exclude_cases"),
                 key=f"{prefix}_dim_do_not_exclude_cases_{idx}",
                 height=96,
+                placeholder=_dimension_field_placeholder("do_not_exclude_cases"),
             )
             case_cols[1].text_area(
                 _dimension_field_label("fatal_mismatch_cases"),
                 key=f"{prefix}_dim_fatal_mismatch_cases_{idx}",
                 height=96,
+                placeholder=_dimension_field_placeholder("fatal_mismatch_cases"),
             )
 
     dimensions = _collect_dimensions_from_widgets(prefix)
@@ -533,12 +559,15 @@ def _render_prompt_library(prefix: str, project_id: int, user_id: int) -> None:
         ui.empty_state(t("no_prompt_saved"))
         return
 
-    with st.container(height=420, border=True):
+    with st.container(height=440, border=True):
         open_ids = set(st.session_state.get(f"{prefix}_prompt_library_open_ids", set()))
         for item in versions:
             item_id = int(item["id"])
-            cols = st.columns([3.4, 1.1, 1.1, 1.1], vertical_alignment="center")
+            is_active = bool(item.get("is_active"))
+            cols = st.columns([2.5, 0.85, 0.85, 1.15, 0.85], vertical_alignment="center")
             cols[0].markdown(f"**{item.get('name') or item_id}**")
+            if is_active:
+                cols[0].markdown(ui.status_pill(t("current_prompt_active"), variant="success"), unsafe_allow_html=True)
             cols[0].caption(item.get("created_at", ""))
             view_label = t("collapse") if item_id in open_ids else t("view")
             if cols[1].button(view_label, key=f"{prefix}_view_prompt_{item_id}", use_container_width=True):
@@ -547,7 +576,16 @@ def _render_prompt_library(prefix: str, project_id: int, user_id: int) -> None:
             if cols[2].button(t("load"), key=f"{prefix}_load_prompt_{item_id}", use_container_width=True):
                 st.session_state[f"{prefix}_pending_load_prompt_id"] = item_id
                 st.rerun()
-            if cols[3].button(t("delete"), key=f"{prefix}_delete_prompt_{item_id}", use_container_width=True):
+            if cols[3].button(
+                t("set_current_prompt"),
+                key=f"{prefix}_activate_prompt_{item_id}",
+                use_container_width=True,
+                disabled=is_active,
+            ):
+                set_active_prompt_version(project_id, user_id, item_id)
+                st.toast(t("current_prompt_updated"))
+                st.rerun()
+            if cols[4].button(t("delete"), key=f"{prefix}_delete_prompt_{item_id}", use_container_width=True):
                 st.session_state[f"{prefix}_pending_delete_prompt_id"] = item_id
                 st.rerun()
             if item_id in open_ids:
@@ -600,41 +638,68 @@ def _render_results(prefix: str, project_id: int, user_id: int) -> None:
         st.rerun()
 
 
-def render(project: dict[str, object], user: dict[str, object]) -> None:
+def _render_context_status(project_id: int, user_id: int, include_prompt: bool = True):
+    api_config = get_active_api_config(user_id)
+    active_file = get_active_data_file(project_id, user_id)
+    active_prompt = get_active_prompt_version(project_id, user_id) if include_prompt else None
+    with st.container(border=True):
+        ui.render_context_status(
+            t("api_ready") if api_config else t("api_missing"),
+            api_config is not None,
+            t("current_data_source"),
+            str(active_file["filename"]) if active_file else t("not_selected"),
+            active_file is not None,
+            t("current_prompt") if include_prompt else "",
+            str(active_prompt["name"]) if active_prompt else t("not_set"),
+            active_prompt is not None,
+        )
+    return api_config, active_file, active_prompt
+
+
+def render_settings(project: dict[str, object], user: dict[str, object]) -> None:
     project_id = int(project["id"])
     user_id = int(user["id"])
     prefix = _prefix(project_id)
     _ensure_state(prefix)
     _apply_pending_loads(prefix, project_id, user_id)
     _apply_pending_dimension_action(prefix)
+    _render_context_status(project_id, user_id)
 
-    file_record = get_active_data_file(project_id, user_id)
-    if not file_record:
-        ui.empty_state(t("no_active_data_file"))
-        return
-
-    try:
-        _, df = load_project_dataframe(project_id, user_id, int(file_record["id"]))
-    except ManagedFileMissingError:
-        logger.exception("Active data source is missing for project_id=%s user_id=%s", project_id, user_id)
-        st.error(t("managed_file_missing"))
-        return
-    except Exception:
-        logger.exception("Active data source loading failed for project_id=%s user_id=%s", project_id, user_id)
-        st.error(t("data_preview_failed"))
-        return
-
-    if df is None or df.empty:
-        ui.empty_state(t("no_data"))
-        return
-
-    st.text_area(t("review_topic"), key=f"{prefix}_review_topic", height=88)
+    st.text_area(
+        t("review_topic"),
+        key=f"{prefix}_review_topic",
+        height=88,
+        placeholder=t("review_topic_placeholder"),
+    )
     meta_cols = st.columns(2)
-    meta_cols[0].text_input(t("review_type"), key=f"{prefix}_review_type", placeholder=REVIEW_TYPE_PLACEHOLDER)
-    meta_cols[1].text_input(t("target_literature_type"), key=f"{prefix}_target_literature_type", placeholder=TARGET_LITERATURE_TYPE_PLACEHOLDER)
-    st.text_area(t("review_objective"), key=f"{prefix}_review_objective", height=96)
-    st.text_area(t("inclusion_criteria"), key=f"{prefix}_inclusion", height=120)
-    st.text_area(t("exclusion_criteria"), key=f"{prefix}_exclusion", height=120)
+    meta_cols[0].text_input(
+        t("review_type"),
+        key=f"{prefix}_review_type",
+        placeholder=REVIEW_TYPE_PLACEHOLDER,
+    )
+    meta_cols[1].text_input(
+        t("target_literature_type"),
+        key=f"{prefix}_target_literature_type",
+        placeholder=TARGET_LITERATURE_TYPE_PLACEHOLDER,
+    )
+    st.text_area(
+        t("review_objective"),
+        key=f"{prefix}_review_objective",
+        height=96,
+        placeholder=t("review_objective_placeholder"),
+    )
+    st.text_area(
+        t("inclusion_criteria"),
+        key=f"{prefix}_inclusion",
+        height=120,
+        placeholder=t("inclusion_criteria_placeholder"),
+    )
+    st.text_area(
+        t("exclusion_criteria"),
+        key=f"{prefix}_exclusion",
+        height=120,
+        placeholder=t("exclusion_criteria_placeholder"),
+    )
 
     dimensions = _render_dimensions(prefix)
 
@@ -649,18 +714,22 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
     if st.session_state[f"{prefix}_workflow_mode"] == "use_ai":
         if st.button(t("expand_with_ai"), use_container_width=True):
             try:
-                expanded = expand_criteria_with_ai(
-                    user_id,
-                    st.session_state[f"{prefix}_review_topic"],
-                    st.session_state[f"{prefix}_review_type"],
-                    st.session_state[f"{prefix}_review_objective"],
-                    st.session_state[f"{prefix}_target_literature_type"],
-                    st.session_state[f"{prefix}_inclusion"],
-                    st.session_state[f"{prefix}_exclusion"],
-                    dimensions,
-                )
-                _set_ai_expanded_state(prefix, expanded)
-                st.session_state[f"{prefix}_last_saved_criteria_id"] = None
+                with st.status(t("ai_expansion_running"), expanded=True) as status:
+                    st.write(t("ai_stage_calling"))
+                    expanded = expand_criteria_with_ai(
+                        user_id,
+                        st.session_state[f"{prefix}_review_topic"],
+                        st.session_state[f"{prefix}_review_type"],
+                        st.session_state[f"{prefix}_review_objective"],
+                        st.session_state[f"{prefix}_target_literature_type"],
+                        st.session_state[f"{prefix}_inclusion"],
+                        st.session_state[f"{prefix}_exclusion"],
+                        dimensions,
+                    )
+                    st.write(t("ai_stage_saving"))
+                    _set_ai_expanded_state(prefix, expanded)
+                    st.session_state[f"{prefix}_last_saved_criteria_id"] = None
+                    status.update(label=t("ai_expansion_complete"), state="complete", expanded=False)
                 st.rerun()
             except Exception:
                 logger.exception("AI criteria expansion failed for project_id=%s user_id=%s", project_id, user_id)
@@ -674,7 +743,12 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
             st.text_area(t("expanded_review_objective"), key=f"{prefix}_expanded_objective", height=96)
             st.text_area(t("expanded_inclusion_criteria"), key=f"{prefix}_expanded_include", height=120)
             st.text_area(t("expanded_exclusion_criteria"), key=f"{prefix}_expanded_exclude", height=120)
-            st.text_area(t("expanded_dimension_rules"), key=f"{prefix}_expanded_dims", height=220, help=t("expanded_dimension_rules_help"))
+            st.text_area(
+                t("expanded_dimension_rules"),
+                key=f"{prefix}_expanded_dims",
+                height=220,
+                help=t("expanded_dimension_rules_help"),
+            )
 
     button_cols = st.columns(2)
     if button_cols[0].button(t("save_standard"), key=f"{prefix}_open_save_criteria", use_container_width=True):
@@ -699,10 +773,23 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
     prompt_text = st.text_area(t("prompt_text"), key=f"{prefix}_prompt_editor", height=300)
     st.session_state[f"{prefix}_prompt"] = prompt_text
 
-    if st.button(t("review_with_ai"), key=f"{prefix}_review_prompt_button", use_container_width=True, disabled=not prompt_text.strip()):
+    if st.button(
+        t("bilingual_compare"),
+        key=f"{prefix}_review_prompt_button",
+        use_container_width=True,
+        disabled=not prompt_text.strip(),
+    ):
         try:
-            bilingual = create_bilingual_review(user_id, prompt_text, st.session_state.get(f"{prefix}_prompt_components"))
-            st.session_state[f"{prefix}_bilingual"] = bilingual
+            with st.status(t("bilingual_running"), expanded=True) as status:
+                st.write(t("bilingual_stage_translate"))
+                bilingual = create_bilingual_review(
+                    user_id,
+                    prompt_text,
+                    st.session_state.get(f"{prefix}_prompt_components"),
+                )
+                st.write(t("bilingual_stage_assemble"))
+                st.session_state[f"{prefix}_bilingual"] = bilingual
+                status.update(label=t("bilingual_complete"), state="complete", expanded=False)
             st.rerun()
         except Exception:
             logger.exception("Bilingual prompt review failed for project_id=%s user_id=%s", project_id, user_id)
@@ -710,44 +797,117 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
 
     bilingual = st.session_state.get(f"{prefix}_bilingual")
     if bilingual:
-        ui.section_title(t("bilingual_review"))
+        ui.section_title(t("bilingual_compare"))
         _render_bilingual_review(prefix, bilingual)
 
     prompt_name_col, save_prompt_col = st.columns([2.4, 1], vertical_alignment="bottom")
-    prompt_name = prompt_name_col.text_input(t("prompt_name"), key=f"{prefix}_save_prompt_name", placeholder=t("prompt_name"))
+    prompt_name = prompt_name_col.text_input(
+        t("prompt_name"),
+        key=f"{prefix}_save_prompt_name",
+        placeholder=t("prompt_name"),
+    )
     if save_prompt_col.button(t("save_prompt"), use_container_width=True, disabled=not prompt_text.strip()):
         cleaned_prompt_name = prompt_name.strip()
         if not cleaned_prompt_name:
             st.error(t("prompt_name_required"))
         else:
-            version_id = save_prompt_version(project_id, user_id, prompt_text, st.session_state.get(f"{prefix}_bilingual"), name=cleaned_prompt_name)
-            st.success(f"{t('prompt_saved')} #{version_id}")
+            version_id = save_prompt_version(
+                project_id,
+                user_id,
+                prompt_text,
+                st.session_state.get(f"{prefix}_bilingual"),
+                name=cleaned_prompt_name,
+                criteria_snapshot_id=st.session_state.get(f"{prefix}_last_saved_criteria_id"),
+                make_active=True,
+            )
+            st.toast(f"{t('prompt_saved')} #{version_id}")
+            st.rerun()
 
     st.divider()
     _render_prompt_library(prefix, project_id, user_id)
 
-    st.divider()
-    ui.section_title(t("run_screening"))
-    api_config = get_active_api_config(user_id)
-    if not api_config:
-        st.warning(t("api_missing"))
 
-    completed_existing_runs = get_existing_screening_runs_for_file(project_id, user_id, int(file_record["id"]))
+def render(project: dict[str, object], user: dict[str, object]) -> None:
+    project_id = int(project["id"])
+    user_id = int(user["id"])
+    prefix = _prefix(project_id)
+    _ensure_state(prefix)
+
+    api_config, file_record, active_prompt = _render_context_status(project_id, user_id)
+
+    if active_prompt:
+        ui.section_title(t("current_prompt"), str(active_prompt["name"]))
+        st.caption(
+            f"{t('created_at')}: {active_prompt.get('created_at', '')} | "
+            f"{t('criteria_snapshot')}: #{active_prompt.get('criteria_snapshot_id') or '-'}"
+        )
+        with st.expander(t("view_current_prompt"), expanded=False):
+            ui.ai_result_panel(t("prompt_text"), str(active_prompt.get("prompt_text", "")), height=300)
+    else:
+        st.warning(t("no_active_prompt"))
+
+    df = None
+    if not file_record:
+        st.warning(t("no_active_data_file"))
+    else:
+        try:
+            _, df = load_project_dataframe(project_id, user_id, int(file_record["id"]))
+        except ManagedFileMissingError:
+            logger.exception("Active data source is missing for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("managed_file_missing"))
+        except Exception:
+            logger.exception("Active data source loading failed for project_id=%s user_id=%s", project_id, user_id)
+            st.error(t("data_preview_failed"))
+
+    ui.section_title(t("run_screening"))
+    completed_existing_runs = (
+        get_existing_screening_runs_for_file(project_id, user_id, int(file_record["id"]))
+        if file_record
+        else []
+    )
     if completed_existing_runs:
         st.warning(t("existing_screening_result_hint"))
 
     control_cols = st.columns(3)
-    control_cols[0].number_input(t("batch_size"), min_value=1, max_value=100, step=1, key=f"{prefix}_batch_size")
-    control_cols[1].number_input(t("rate_limit_per_min"), min_value=1, max_value=600, step=1, key=f"{prefix}_rate_limit")
-    control_cols[2].number_input(t("temperature"), min_value=0.0, max_value=1.0, step=0.1, key=f"{prefix}_temperature")
+    control_cols[0].number_input(
+        t("batch_size"),
+        min_value=1,
+        max_value=100,
+        step=1,
+        key=f"{prefix}_batch_size",
+        help=t("batch_size_help"),
+    )
+    control_cols[1].number_input(
+        t("rate_limit_per_min"),
+        min_value=1,
+        max_value=600,
+        step=1,
+        key=f"{prefix}_rate_limit",
+        help=t("rate_limit_help"),
+    )
+    control_cols[2].number_input(
+        t("temperature"),
+        min_value=0.0,
+        max_value=1.0,
+        step=0.1,
+        key=f"{prefix}_temperature",
+        help=t("temperature_help"),
+    )
 
     confirmed = st.checkbox(t("confirm_start_screening"), key=f"{prefix}_confirm_start_screening")
+    disabled_reasons = []
+    if api_config is None:
+        disabled_reasons.append(t("run_disabled_reason_api"))
+    if not file_record or df is None or df.empty:
+        disabled_reasons.append(t("run_disabled_reason_data"))
+    if not active_prompt:
+        disabled_reasons.append(t("run_disabled_reason_active_prompt"))
     if not confirmed:
-        st.info(t("screening_disabled_no_confirm"))
+        disabled_reasons.append(t("run_disabled_reason_confirm"))
+    if disabled_reasons:
+        st.warning(t("run_disabled_reasons").format(reasons="; ".join(disabled_reasons)))
 
-    latest_versions = list_prompt_versions(project_id, user_id)
-    latest_version_id = int(latest_versions[0]["id"]) if latest_versions else None
-    run_disabled = api_config is None or not prompt_text.strip() or not confirmed
+    run_disabled = bool(disabled_reasons)
 
     def execute_screening_run() -> None:
         try:
@@ -759,17 +919,24 @@ def render(project: dict[str, object], user: dict[str, object]) -> None:
                 progress_bar.progress(ratio)
                 progress_text.caption(t("screening_progress_text").format(done=done, total=total))
 
+            dimensions = _normalize_dimensions(st.session_state.get(f"{prefix}_dimensions", _default_dimensions()))
+            criteria_id = active_prompt.get("criteria_snapshot_id") if active_prompt else None
+            if criteria_id:
+                snapshot = get_criteria_snapshot(project_id, user_id, int(criteria_id))
+                if snapshot:
+                    dimensions = _normalize_dimensions(snapshot.get("dimensions") or dimensions)
+
             result = run_screening(
                 project_id,
                 user_id,
                 int(file_record["id"]),
                 df,
-                prompt_text,
+                str(active_prompt["prompt_text"]),
                 dimensions,
                 int(st.session_state[f"{prefix}_batch_size"]),
                 int(st.session_state[f"{prefix}_rate_limit"]),
                 float(st.session_state[f"{prefix}_temperature"]),
-                latest_version_id,
+                int(active_prompt["id"]),
                 progress_callback=_progress,
             )
             st.success(f"{t('run_complete')} #{result['run_id']}")

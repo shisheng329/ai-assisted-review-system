@@ -10,6 +10,7 @@ This repository is a Python / Streamlit / SQLite application for AI-assisted lit
 - Do not change database schema unless the task explicitly requires a compatible migration.
 - Do not submit `.env`, Streamlit secrets, databases, uploads, exports, logs, caches, or user data.
 - Do not add mock data to production paths.
+- Do not start or delegate work to subagents unless the user explicitly allows it.
 
 ## Validation Rules
 

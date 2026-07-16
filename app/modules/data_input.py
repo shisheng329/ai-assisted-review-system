@@ -8,6 +8,7 @@ from app import session_state as ss
 from app import ui
 from app.services.i18n import t
 from app.services.llm import get_active_api_config
+from app.services.screening import get_active_prompt_version
 from app.services.storage import (
     ManagedFileMissingError,
     delete_data_file,
@@ -28,10 +29,18 @@ logger = logging.getLogger(__name__)
 def _render_active_summary(project_id: int, user_id: int) -> None:
     api_ready = get_active_api_config(user_id) is not None
     active_file = get_active_data_file(project_id, user_id)
+    active_prompt = get_active_prompt_version(project_id, user_id)
     with st.container(border=True):
-        col1, col2 = st.columns(2)
-        col1.markdown(ui.status_pill(t("api_ready") if api_ready else t("api_missing"), active=api_ready), unsafe_allow_html=True)
-        col2.markdown(f"**{t('current_data_source')}**: {active_file['filename'] if active_file else t('no_data')}")
+        ui.render_context_status(
+            t("api_ready") if api_ready else t("api_missing"),
+            api_ready,
+            t("current_data_source"),
+            str(active_file["filename"]) if active_file else t("not_selected"),
+            active_file is not None,
+            t("current_prompt"),
+            str(active_prompt["name"]) if active_prompt else t("not_set"),
+            active_prompt is not None,
+        )
 
 
 def _render_upload(project_id: int, user_id: int) -> None:

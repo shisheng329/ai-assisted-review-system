@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 MODULES = {
     "dashboard": dashboard.render,
     "data_input": data_input.render,
+    "screening_settings": llm_screening.render_settings,
     "screening": llm_screening.render,
     "bertopic": bertopic_analysis.render,
     "pdf_extraction": pdf_extraction.render,
@@ -39,6 +40,7 @@ NAV_MARKS = {
     "profile": "U",
     "dashboard": "D",
     "data_input": "I",
+    "screening_settings": "F",
     "screening": "S",
     "bertopic": "C",
     "pdf_extraction": "X",
@@ -274,6 +276,7 @@ def render_authenticated() -> None:
         current = current if current in options else "projects"
         ss.set_value(ss.CURRENT_MODULE, current)
         render_sidebar(user, options, current)
+        ui.apply_page_width("compact" if current == "profile" else "standard")
         render_shell_header(user, t(current), None)
         if current == "projects":
             project_list.render(user)
@@ -281,11 +284,21 @@ def render_authenticated() -> None:
             profile.render(user)
         return
 
-    options = ["dashboard", "data_input", "screening", "bertopic", "pdf_extraction", "profile"]
+    options = ["dashboard", "data_input", "screening_settings", "screening", "bertopic", "pdf_extraction", "profile"]
     current = ss.get(ss.CURRENT_MODULE, "dashboard")
     current = current if current in options else "dashboard"
     ss.set_value(ss.CURRENT_MODULE, current)
     render_sidebar(user, options, current, project)
+    width_mode = {
+        "dashboard": "wide",
+        "data_input": "wide",
+        "screening_settings": "compact",
+        "screening": "standard",
+        "bertopic": "wide",
+        "pdf_extraction": "compact",
+        "profile": "compact",
+    }.get(current, "standard")
+    ui.apply_page_width(width_mode)
     render_shell_header(user, t(current), project)
     if current == "profile":
         profile.render(user)

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 from pypdf import PdfReader
@@ -12,6 +13,10 @@ from . import db
 from .llm import chat_text
 from .storage import get_pdf_files_by_ids, project_exports_root, save_export_dataframe
 from .utils import json_dumps, json_loads, short_uuid, utc_now_iso
+
+
+logger = logging.getLogger(__name__)
+PDFProgressCallback = Callable[[int, int, str, str, str], None]
 
 
 def _extract_pdf_text(pdf_path: str) -> str:
@@ -64,7 +69,14 @@ def _normalize_payload(payload: dict[str, Any], template_columns: list[str]) -> 
     return normalized
 
 
-def run_pdf_extraction(project_id: int, user_id: int, template_id: int, template_columns: list[str], pdf_file_ids: list[int]) -> dict[str, Any]:
+def run_pdf_extraction(
+    project_id: int,
+    user_id: int,
+    template_id: int,
+    template_columns: list[str],
+    pdf_file_ids: list[int],
+    progress_callback: PDFProgressCallback | None = None,
+) -> dict[str, Any]:
     pdf_files = get_pdf_files_by_ids(project_id, user_id, pdf_file_ids)
     if not pdf_files:
         raise RuntimeError("No PDF files selected for extraction.")
@@ -76,8 +88,20 @@ def run_pdf_extraction(project_id: int, user_id: int, template_id: int, template
         (project_id, user_id, template_id, json_dumps({"columns": template_columns, "pdf_file_ids": pdf_file_ids}), utc_now_iso(), utc_now_iso()),
     )
     rows = []
+    total_files = len(pdf_files)
+
+    def notify(done: int, filename: str, stage: str, error: str = "") -> None:
+        if not progress_callback:
+            return
+        try:
+            progress_callback(done, total_files, filename, stage, error)
+        except Exception:
+            logger.exception("PDF progress callback failed for project_id=%s", project_id)
+
     try:
+        notify(0, "", "preparing")
         for index, pdf_file in enumerate(pdf_files):
+            notify(index, pdf_file["filename"], "processing")
             try:
                 extracted_text = _extract_pdf_text(pdf_file["stored_path"])[:20000]
                 language = _detect_document_language(extracted_text)
@@ -106,6 +130,7 @@ def run_pdf_extraction(project_id: int, user_id: int, template_id: int, template
                 error_message = str(exc)
             row = {"file_name": pdf_file["filename"], **payload, "error_message": error_message}
             rows.append(row)
+            notify(index + 1, pdf_file["filename"], "failed" if error_message else "completed", error_message)
             db.execute(
                 """
                 INSERT INTO pdf_results (pdf_run_id, row_index, file_name, extracted_json, error_message)
@@ -116,13 +141,24 @@ def run_pdf_extraction(project_id: int, user_id: int, template_id: int, template
         df = pd.DataFrame(rows)
         export_path = project_exports_root(user_id, project_id) / f"pdf_extract_{short_uuid()}.csv"
         save_export_dataframe(df, export_path)
-        failed_count = sum(1 for row in rows if row["error_message"])
+        failed_rows = [row for row in rows if row["error_message"]]
+        failed_count = len(failed_rows)
+        success_count = len(rows) - failed_count
         run_status = "failed" if failed_count == len(rows) else "completed"
         db.execute(
             "UPDATE pdf_runs SET status = ?, output_path = ?, updated_at = ? WHERE id = ?",
             (run_status, str(export_path), utc_now_iso(), run_id),
         )
-        return {"run_id": run_id, "results_df": df}
+        return {
+            "run_id": run_id,
+            "results_df": df,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "failures": [
+                {"file_name": row["file_name"], "error_message": row["error_message"]}
+                for row in failed_rows
+            ],
+        }
     except Exception:
         db.execute(
             "UPDATE pdf_runs SET status = 'failed', updated_at = ? WHERE id = ?",

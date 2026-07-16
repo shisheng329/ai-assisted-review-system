@@ -200,20 +200,53 @@ def _render_ai_text_result(
     if st.button(t(button_key), key=f"{result_key}_{run_id}_generate", disabled=disabled, use_container_width=True):
         generate_result()
 
-def _render_chart_card(column, chart_key: str, artifact_path: str, interpretation: str, run_id: int, topic_info_csv: str, user_id: int, topic_count: int) -> None:
+def _render_chart_card(
+    column,
+    chart_key: str,
+    artifact_path: str | None,
+    diagnostic: dict[str, Any],
+    interpretation: str,
+    run_id: int,
+    topic_info_csv: str,
+    user_id: int,
+    topic_count: int,
+) -> None:
     with column:
         st.markdown(f"#### {_chart_title(chart_key)}")
-        try:
-            chart_payload = load_plotly_artifact(artifact_path)
-            figure = _apply_chart_layout(go.Figure(chart_payload), chart_key, topic_count)
-            st.plotly_chart(figure, use_container_width=True, key=f"chart_{run_id}_{chart_key}")
-        except ManagedFileMissingError:
-            logger.exception("BERTopic chart artifact is missing for run_id=%s chart=%s", run_id, chart_key)
-            st.warning(t("result_file_missing"))
-            return
-        except Exception:
-            logger.exception("BERTopic chart rendering failed for run_id=%s chart=%s", run_id, chart_key)
-            st.warning(t("result_file_missing"))
+        chart_payload: dict[str, Any] | None = None
+        if artifact_path:
+            try:
+                chart_payload = load_plotly_artifact(artifact_path)
+                figure = _apply_chart_layout(go.Figure(chart_payload), chart_key, topic_count)
+                st.plotly_chart(figure, use_container_width=True, key=f"chart_{run_id}_{chart_key}")
+            except ManagedFileMissingError:
+                logger.exception("BERTopic chart artifact is missing for run_id=%s chart=%s", run_id, chart_key)
+                st.warning(t("chart_artifact_missing"))
+            except Exception as exc:
+                logger.exception("BERTopic chart rendering failed for run_id=%s chart=%s", run_id, chart_key)
+                st.warning(f"{t('chart_unavailable')}: {str(exc)[:180]}")
+        else:
+            effective_topic_count = int(diagnostic.get("effective_topic_count") or topic_count or 0)
+            error_message = str(diagnostic.get("error_message") or "").strip()
+            if effective_topic_count < 2 and chart_key in {"topics", "hierarchy"}:
+                st.info(t("chart_effective_topics_insufficient"))
+            elif error_message:
+                st.warning(f"{t('chart_unavailable')}: {error_message}")
+            else:
+                st.warning(t("chart_unavailable"))
+
+        if chart_payload is None:
+            if interpretation:
+                _render_ai_text_result(
+                    run_id,
+                    f"interpret_{chart_key}",
+                    "chart_interpretation",
+                    "generate_interpretation",
+                    interpretation,
+                    True,
+                    lambda: None,
+                    result_height=220,
+                )
             return
 
         _render_ai_text_result(
@@ -223,10 +256,15 @@ def _render_chart_card(column, chart_key: str, artifact_path: str, interpretatio
             "generate_interpretation",
             interpretation,
             get_active_api_config(user_id) is None,
-            lambda: save_chart_interpretation(user_id, run_id, chart_key, _chart_context(chart_key, chart_payload, topic_info_csv), current_language()),
+            lambda: save_chart_interpretation(
+                user_id,
+                run_id,
+                chart_key,
+                _chart_context(chart_key, chart_payload or {}, topic_info_csv),
+                current_language(),
+            ),
             result_height=220,
         )
-
 
 def _render_topic_results(project_id: int, user_id: int) -> None:
     runs = list_topic_runs(project_id, user_id)
@@ -286,10 +324,20 @@ def _render_topic_results(project_id: int, user_id: int) -> None:
         )
 
     artifacts = selected_run.get("artifacts", {})
+    diagnostics = dict((selected_run.get("error_detail") or {}).get("chart_diagnostics") or {})
     chart_cols = st.columns(3)
     for index, chart_key in enumerate(["barchart", "topics", "hierarchy"]):
-        if chart_key in artifacts:
-            _render_chart_card(chart_cols[index], chart_key, artifacts[chart_key], interpretations.get(chart_key, ""), run_id, topic_info_csv, user_id, topic_count)
+        _render_chart_card(
+            chart_cols[index],
+            chart_key,
+            artifacts.get(chart_key),
+            dict(diagnostics.get(chart_key) or {}),
+            interpretations.get(chart_key, ""),
+            run_id,
+            topic_info_csv,
+            user_id,
+            topic_count,
+        )
 
     pending_delete_id = ss.get(ss.PENDING_DELETE_TOPIC_RUN_ID)
     if pending_delete_id:
@@ -398,8 +446,19 @@ def render(project: dict, user: dict) -> None:
         }
         try:
             with st.status(t("bertopic_running"), expanded=True) as status:
-                st.write(t("bertopic_import_check"))
-                result = run_bertopic(project_id, user_id, working_df, "screening" if source_mode == "inherit_screening_results" else "upload", params, data_file_id=data_file_id, screening_run_id=screening_run_id)
+                def update_stage(stage: str) -> None:
+                    status.update(label=t(f"bertopic_stage_{stage}"), state="running", expanded=True)
+
+                result = run_bertopic(
+                    project_id,
+                    user_id,
+                    working_df,
+                    "screening" if source_mode == "inherit_screening_results" else "upload",
+                    params,
+                    data_file_id=data_file_id,
+                    screening_run_id=screening_run_id,
+                    progress_callback=update_stage,
+                )
                 status.update(label=f"{t('run_complete')} #{result['run_id']}", state="complete", expanded=False)
             st.session_state.pop(confirm_overwrite_key, None)
             st.success(f"{t('run_complete')} #{result['run_id']}")
@@ -437,11 +496,11 @@ def render(project: dict, user: dict) -> None:
             st.rerun()
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.number_input(t("random_state"), step=1, key=f"{prefix}_random_state")
-    col2.number_input(t("n_neighbors"), step=1, key=f"{prefix}_n_neighbors")
-    col3.number_input(t("n_components"), step=1, key=f"{prefix}_n_components")
-    col4.number_input(t("min_topic_size"), step=1, key=f"{prefix}_min_topic_size")
-    col5.number_input(t("nr_topics"), step=1, key=f"{prefix}_nr_topics")
+    col1.number_input(t("random_state"), step=1, key=f"{prefix}_random_state", help=t("random_state_help"))
+    col2.number_input(t("n_neighbors"), step=1, key=f"{prefix}_n_neighbors", help=t("n_neighbors_help"))
+    col3.number_input(t("n_components"), step=1, key=f"{prefix}_n_components", help=t("n_components_help"))
+    col4.number_input(t("min_topic_size"), step=1, key=f"{prefix}_min_topic_size", help=t("min_topic_size_help"))
+    col5.number_input(t("nr_topics"), step=1, key=f"{prefix}_nr_topics", help=t("nr_topics_help"))
     st.caption(t("bertopic_default_settings"))
 
     _render_topic_results(project_id, user_id)

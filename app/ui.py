@@ -89,6 +89,59 @@ def inline_status(label: str, variant: str = "neutral") -> None:
     st.markdown(status_pill(label, variant=variant), unsafe_allow_html=True)
 
 
+def render_context_status(
+    api_label: str,
+    api_ready: bool,
+    data_source_label: str,
+    data_source_name: str,
+    data_source_ready: bool,
+    prompt_label: str = "",
+    prompt_name: str = "",
+    prompt_ready: bool = False,
+) -> None:
+    items = [
+        (api_label, api_ready, "success" if api_ready else "warning"),
+        (
+            f"{data_source_label}: {data_source_name}",
+            data_source_ready,
+            "info" if data_source_ready else "warning",
+        ),
+    ]
+    if prompt_label:
+        items.append(
+            (
+                f"{prompt_label}: {prompt_name}",
+                prompt_ready,
+                "success" if prompt_ready else "warning",
+            )
+        )
+    columns = st.columns(len(items))
+    for column, (label, active, variant) in zip(columns, items):
+        column.markdown(status_pill(label, active=active, variant=variant), unsafe_allow_html=True)
+
+
+def apply_page_width(mode: str = "standard") -> None:
+    widths = {"compact": "1160px", "standard": "1320px", "wide": "1540px"}
+    max_width = widths.get(mode, widths["standard"])
+    st.markdown(
+        f"""
+        <style>
+        .block-container {{
+            max-width: {max_width} !important;
+            width: min(100%, {max_width}) !important;
+        }}
+        @media (max-width: 760px) {{
+            .block-container {{
+                width: 100% !important;
+                max-width: 100% !important;
+            }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def empty_state(title: str, body: str = "") -> None:
     body_html = f"<p>{escape(body)}</p>" if body else ""
     st.markdown(

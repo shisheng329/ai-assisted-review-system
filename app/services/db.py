@@ -254,6 +254,20 @@ def init_db() -> None:
         _ensure_column(conn, "criteria_snapshots", "review_objective", "TEXT DEFAULT \"\"")
         _ensure_column(conn, "criteria_snapshots", "target_literature_type", "TEXT DEFAULT \"\"")
         _ensure_column(conn, "prompt_versions", "name", "TEXT")
+        _ensure_column(conn, "prompt_versions", "criteria_snapshot_id", "INTEGER")
+        _ensure_column(conn, "prompt_versions", "is_active", "INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            UPDATE prompt_versions
+            SET is_active = 1
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM prompt_versions
+                GROUP BY project_id, user_id
+                HAVING SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) = 0
+            )
+            """
+        )
         _ensure_column(conn, "topic_runs", "error_type", "TEXT")
         _ensure_column(conn, "topic_runs", "error_message", "TEXT")
         _ensure_column(conn, "topic_runs", "error_detail_json", "TEXT")
